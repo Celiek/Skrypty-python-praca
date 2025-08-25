@@ -2,6 +2,9 @@ import requests
 import pandas as pd
 import time
 
+# pobiera podstawowe dane kontrahentów z clickupa (api) i zapisuje
+# do pliku xlsx
+
 API_TOKEN =  'pk_100546826_B534EGYUV8ZGS9L5YX5PEG7W2S4SPF31'
 
 # 🆔 ID listy z ClickUp
