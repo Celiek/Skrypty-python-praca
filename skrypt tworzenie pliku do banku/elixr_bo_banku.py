@@ -11,26 +11,27 @@ from typing import Optional
 
 import pandas as pd
 import psycopg2
-from psycopg2.extras import RealDictCursor,execute_values
+from psycopg2.extras import RealDictCursor, execute_values
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 
+# TODO
+# BIAŁA LIST PŁĄTNIKÓW VAT nr kont, nipy poprawność
 
 #######################
-# INSTRUKCJA OBSUGI CLI
+# INSTRUKCJA OBSLUGI CLI
 #######################
-
-# Shumme, wyjście automatycznie nazwane:
-# py elixir_do_banku.py ".\plik_testowy.xlsx" -c shumme
-
-# Greatstore, własna ścieżka wyjściowa i blokowanie duplikatów:
+# Shumee (auto nazwa wyjścia):
+# py elixir_do_banku.py ".\plik_testowy.xlsx" -c shumee
+#
+# Greatstore (własna ścieżka + blokada duplikatów):
 # py elixir_do_banku.py ".\plik_testowy.xlsx" -c greatstore -o ".\export\greatstore_elixir.txt" --dup error
-
-# Superstore, z włączoną widoczną przeglądarką (debug scrapera):
-# py elixir_do_banku.py ".\plik_testowy.xlsx" -c superstore --no-headless
+#
+# Extrastore (widoczna przeglądarka – debug scrapera):
+# py elixir_do_banku.py ".\plik_testowy.xlsx" -c extrastore --no-headless
 
 # =========================
 # Konfiguracja i narzędzia
@@ -64,16 +65,13 @@ COMPANIES = {
     },
 }
 
-
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", r"C:\tools\chromedriver-win64\chromedriver.exe")
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", ".")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-OUTPUT_TXT = os.path.join(OUTPUT_DIR, f"przelewy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
-# Domyślnie cp1250 (Windows-1250). Możesz nadpisać w .env: OUTPUT_ENCODING=iso8859_2
+# Domyślnie ISO-8859-2 (lub nadpisz w .env)
 OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
-
 
 # =========================
 # Normalizacja / kodowanie
@@ -97,8 +95,9 @@ def _elixir_safe_text(s: str) -> str:
     t = unicodedata.normalize("NFKC", str(s))
     t = t.translate(str.maketrans(_ELIXIR_SAFE_MAP))
     return t
-# USuwanie zabronionych znaków z tesktu
+
 def sanitize_text(text: str) -> str:
+    """Usuwa zabronione znaki i nadmiarowe spacje."""
     if text is None:
         return ""
     text = _elixir_safe_text(text)
@@ -106,33 +105,30 @@ def sanitize_text(text: str) -> str:
     cleaned = "".join(c for c in str(text) if c not in bad)
     return " ".join(cleaned.split())
 
-# dodaje do daty 30 dni
 def add_days_to_date_str(date_str: str, days: int) -> str:
-    """Dodaje dni do daty w formacie YYYYMMDD i zwraca znów YYYYMMDD."""
+    """Dodaje dni do daty (YYYYMMDD) i zwraca (YYYYMMDD)."""
     dt = datetime.strptime(date_str, "%Y%m%d")
     dt_new = dt + timedelta(days=days)
     return dt_new.strftime("%Y%m%d")
 
-# sanityzacja nazw folderów
 def sanitize_nazwa_folderu(text: str) -> str:
+    """Sanityzacja nazw folderów pod Windows/Unix."""
     if text is None:
         return ""
     text = _elixir_safe_text(text)
-    bad = '*;!+?#",'
+    bad = '*;!+?#",<>:\\/|'
     cleaned = "".join(c for c in str(text) if c not in bad)
     return " ".join(cleaned.split())
 
-# zmiana encodingu pliku
 def _latin_safe(s: str) -> str:
-    """Zwraca napis zakodowany w OUTPUT_ENCODING; spoza zakresu → '?' (bez wyjątku)."""
+    """Bezpieczne rzutowanie do OUTPUT_ENCODING; spoza zakresu → '?'."""
     return s.encode(OUTPUT_ENCODING, errors="replace").decode(OUTPUT_ENCODING)
 
 def _latin_safe_join(lines: list[str]) -> str:
     return "\n".join(_latin_safe(line) for line in lines)
 
-
 # ===========================================
-# Utilsy - inne funkcje wymagane do działania
+# Utils
 # ===========================================
 
 def losowe_opoznienie(min_sec=0.05, max_sec=0.1):
@@ -152,14 +148,17 @@ def money_to_grosze(value) -> int:
     return int((d * 100).to_integral_value())
 
 def serializacja_dat(x) -> str:
-    """YYYYMMDD; obsługuje datetime/Timestamp/serial Excela i kilka popularnych formatów."""
+    """YYYYMMDD; obsługuje datetime/Timestamp, serial Excela oraz popularne stringi."""
     if isinstance(x, (datetime, pd.Timestamp)):
-        return x.strftime("%Y%m%d")
+        return pd.to_datetime(x).strftime("%Y%m%d")
+
     if isinstance(x, (int, float)) and not pd.isna(x):
+        # Excel 1900-date system (z "leap bug") → origin=1899-12-30
         try:
-            return pd.to_datetime(x, unit='D', origin='1899-12-30',dayfirst=True).strftime("%Y%m%d")
+            return pd.to_datetime(x, unit="D", origin="1899-12-30").strftime("%Y%m%d")
         except Exception:
             pass
+
     if isinstance(x, str):
         x = x.strip()
         for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y"):
@@ -167,6 +166,7 @@ def serializacja_dat(x) -> str:
                 return datetime.strptime(x, fmt).strftime("%Y%m%d")
             except ValueError:
                 continue
+
     raise ValueError(f"Nieobsługiwany format daty: {x!r}")
 
 def clean_digits(s: str) -> str:
@@ -180,9 +180,8 @@ def valid_nip(nip: str) -> bool:
     checksum = sum(int(nip[i]) * w[i] for i in range(9)) % 11
     return checksum == int(nip[9])
 
-# normalizacja nr banku
 def normalize_nrb(account: str) -> str:
-    """Zwraca 26 cyfr NRB (lub pusty, gdy format niepoprawny)."""
+    """Zwraca 26 cyfr NRB (lub pusty string, gdy format niepoprawny)."""
     if not account:
         return ""
     acc = re.sub(r"\s", "", str(account))
@@ -192,8 +191,8 @@ def normalize_nrb(account: str) -> str:
         return acc[2:]
     return ""
 
-"""8 cyfr rozliczeniowych (poz. 3-10) albo ''."""
 def bank_code_from_nrb(nrb: str) -> str:
+    """8 cyfr rozliczeniowych (poz. 3-10) albo ''. """
     nrb = normalize_nrb(nrb)
     if len(nrb) >= 10:
         return nrb[2:10]
@@ -202,16 +201,11 @@ def bank_code_from_nrb(nrb: str) -> str:
 def is_blank(s: str | None) -> bool:
     return s is None or str(s).strip() == ""
 
-
 # =========================
 # DB helpers
 # =========================
 
 def bulk_insert_oplacone_faktury(rows: list[tuple]):
-    """
-    rows – lista krotek w kolejności kolumn poniżej.
-    Zakładamy, że kolumna Id jest IDENTITY/ma DEFAULT, więc jej nie podajemy.
-    """
     if not rows:
         return
     sql = """
@@ -238,7 +232,6 @@ def bulk_insert_oplacone_faktury(rows: list[tuple]):
             execute_values(cur, sql, rows)
         conn.commit()
 
-
 @contextmanager
 def db_conn():
     conn = psycopg2.connect(**DB_CONFIG)
@@ -260,7 +253,6 @@ def db_execute(query: str, params: tuple):
             conn.commit()
 
 def nr_konta_z_bazy(nip: str):
-    """merchant.nip = BIGINT → używamy int(nip_digits(...)). Zwraca string NRB lub None."""
     nip_num = int(nip_digits(nip))
     rec = db_fetchone("SELECT nr_konta FROM Merchanci WHERE nip = %s", (nip_num,))
     if rec and rec.get("nr_konta"):
@@ -275,26 +267,13 @@ def clean_address(addr: str) -> str:
     if not addr:
         return ""
     t = unicodedata.normalize("NFKC", str(addr))
-    # usuń sekwencję: dowolne kreski/spacje + jeden lub więcej '|'
     t = re.sub(r'^[\-\u2010\u2011\u2012\u2013\u2014\u2212\s]*\|+', '', t)
-
-    # zamień wszystkie rodzaje dashy na spację
     t = re.sub(r'[\-\u2010\u2011\u2012\u2013\u2014\u2212]', ' ', t)
-
-    # posprzątaj odstępy
     t = re.sub(r'\s+', ' ', t).strip()
-
-    # odtwórz format kodu pocztowego: NN NNN → NN-NNN
     t = re.sub(r'(\b\d{2}) (\d{3}\b)', r'\1-\2', t)
-
-    # ładne '|' – bez spacji wokół
     t = re.sub(r'\s*\|\s*', '|', t)
-
-    # usuń ewentualne wiodące/końcowe '|'
     t = t.strip('|')
-
     return t
-
 
 def adres_z_bazy(nip: str) -> str | None:
     nip_num = int(nip_digits(nip))
@@ -348,12 +327,9 @@ def wyciagnij_adres_z_komorek(cells: list[str]) -> str:
     frag = cells[start:end] if len(cells) >= end else cells[max(0, len(cells)-4):]
     if not frag:
         return ""
-
     def clip35(s: str) -> str:
         return s[:35]
-
     return "|".join(clip35(sanitize_text(x)) for x in frag if x)
-
 
 # =========================
 # Get-or-fetch (DB → scrape → DB)
@@ -385,17 +361,18 @@ def get_or_fetch_konto(nip_clean: str) -> str:
     try:
         raw = nr_konta_z_bazy(nip_clean) or ""
         nrb = normalize_nrb(raw)
-        return nrb  # '' jeśli brak lub niepoprawny
+        return nrb
     except Exception as e:
         print(f"[W] Błąd DB przy pobieraniu konta dla NIP {nip_clean}: {e}")
         return ""
+
 def csv_quote(s: str) -> str:
     s = s or ""
-    s = s.replace('"', '""')  # double quotes w CSV
+    s = s.replace('"', '""')
     return f'"{s}"'
 
 # =========================
-# Budowa rekordu i główny przebieg
+# Budowa rekordu
 # =========================
 
 def build_payment_record(
@@ -433,64 +410,42 @@ def build_payment_record(
     return ",".join(fields)
 
 def _norm_doc_no(x: str) -> str:
-    """Ujednolica numer dokumentu: trim, wielkie litery, 1 spacja, bez niewidzialnych znaków."""
     if pd.isna(x):
         return ""
     s = str(x).strip()
-    s = re.sub(r"\s+", " ", s)     # jedna spacja
+    s = re.sub(r"\s+", " ", s)
     s = s.upper()
     return s
 
 def _money_to_gr_series(s: pd.Series) -> pd.Series:
-    """Bezpieczna konwersja kolumn kwotowych do groszy (int) z Twoją regułą zaokrągleń."""
     return s.apply(money_to_grosze)
 
 def find_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Zwraca (df_z_kluczami, df_duplikaty).
-    df_duplikaty: tylko powtarzające się wiersze wg klucza (doc_no_norm, netto_gr, vat_gr, brutto_gr).
-    """
-    # sprawdź wymagane kolumny
     required = {"Numer dokumentu", "Netto", "VAT", "Brutto"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Brak kolumn: {', '.join(sorted(missing))}")
 
-    # kolumny pomocnicze
     d = df.copy()
     d["__doc_no_norm"] = df["Numer dokumentu"].map(_norm_doc_no)
     d["__netto_gr"] = _money_to_gr_series(df["Netto"])
     d["__vat_gr"]   = _money_to_gr_series(df["VAT"])
     d["__brut_gr"]  = _money_to_gr_series(df["Brutto"])
 
-    # maska duplikatów (poza pierwszym wystąpieniem)
     mdup = d.duplicated(subset=["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"], keep="first")
-    dup_rows = d.loc[mdup].copy()
-
-    # dodatkowo możesz chcieć dostać pełne grupy z powtórzeniami (nie tylko „kolejne”)
     group_sizes = d.groupby(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])["Numer dokumentu"].transform("size")
     d["__is_dup_group"] = group_sizes > 1
     full_dup_groups = d.loc[d["__is_dup_group"]].copy()
 
-    # zwróć obie perspektywy: dataframe z kluczami, oraz same duplikaty (pełne grupy)
     return d, full_dup_groups.sort_values(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])
 
 def handle_duplicates(df: pd.DataFrame, action: str = "error") -> pd.DataFrame:
-    """
-    action:
-      - "error" -> rzuca wyjątek z listą dubli
-      - "warn" -> drukuje ostrzeżenia, nic nie usuwa
-      - "drop_keep_first" -> usuwa duplikaty, zostawia pierwsze wystąpienie
-      - "drop_keep_last" -> usuwa duplikaty, zostawia ostatnie wystąpienie
-    Zwraca dataframe gotowy do dalszej obróbki (zachowuje oryginalne kolumny).
-    """
     d, full_dups = find_duplicates(df)
 
     if full_dups.empty:
         return df
 
-    # ładny podgląd co się dubluje
-    preview_cols = ["Numer dokumentu", "Netto", "VAT", "Brutto"]
+    preview_cols  = ["Numer dokumentu", "Netto", "VAT", "Brutto"]
     print("[DUP] Wykryto duplikaty:\n", full_dups[preview_cols].to_string(index=False))
 
     if action == "error":
@@ -515,22 +470,23 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
     full_dups[cols].to_csv(out_path, index=False, encoding="utf-8")
     print(f"[DUP] Raport duplikatów zapisany: {out_path}")
 
-# serializacja danych po dacie do "agregacji" danych
-# kontrahenta do łączonej faktury
 def _safe_serializacja(x) -> str:
     try:
         return serializacja_dat(x)
     except Exception:
         return datetime.now().strftime("%Y%m%d")
 
-# grupuje dane z faktur po nipie lub nazwie kontrahenta
 def _group_key(row) -> str:
     """NIP (10 cyfr) albo fallback na nazwę kontrahenta."""
     nipc = nip_digits(row.get("NIP", ""))
     if len(nipc) == 10 and nipc.isdigit():
-        return nipc  # grupujemy po NIP
+        return nipc
     name = str(row.get("Kontrahent", "")).strip().upper()
-    return f"NAME::{name}"  # grupowanie po nazwie, gdy brak/poprawnego NIP
+    return f"NAME::{name}"
+
+# =========================
+# GŁÓWNA FUNKCJA
+# =========================
 
 def przetworz_plik_xlsx(
     input_file: str,
@@ -560,13 +516,17 @@ def przetworz_plik_xlsx(
     if not re.fullmatch(r"\d{8}", nr_rozliczeniowy_zleceniodawcy):
         raise ValueError(f"Kod rozliczeniowy nadawcy musi mieć 8 cyfr: {nr_rozliczeniowy_zleceniodawcy}")
 
-    # output
+    # przygotowanie ścieżek wyjścia
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     if not output_path:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         output_path = os.path.join(OUTPUT_DIR, f"{key}_przelewy_{ts}.txt")
+    if merged_csv is None:
+        merged_csv = os.path.join(OUTPUT_DIR, f"raport_scalonych_{ts}.csv")
+    if per_group_dir:
+        os.makedirs(per_group_dir, exist_ok=True)
 
-    # wczytanie + duplikaty
+    # wczytanie danych + obsługa duplikatów + walidacja kolumn
     df = pd.read_excel(input_file)
     df = handle_duplicates(df, action=duplicates_action)
     export_duplicates_report(df, os.path.join(OUTPUT_DIR, f"duplikaty_{ts}.csv"))
@@ -583,43 +543,55 @@ def przetworz_plik_xlsx(
     df["__grp_key"] = df.apply(_group_key, axis=1)
     df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
     df["__vat_gr"] = df["VAT"].apply(money_to_grosze)
-    df["__data_str"] = df["Data wpływu"].map(_safe_serializacja)
+    df["__data_str"] = df["Data wpływu"].map(_safe_serializacja)  # YYYYMMDD string
 
-    agg = (
-        df.groupby(["__grp_key", "__data_str"], as_index=False)
-        .agg(
-            nip_clean=("__nip_clean", "first"),
-            kontrahent=("Kontrahent", lambda s: str(s.iloc[0])),
-            data_platnosci=("__data_str", "first"),
-            suma_brutto=("__brutto_gr", "sum"),
-            suma_vat=("__vat_gr", "sum"),
-            cnt=("Numer dokumentu", "count"),
-            first_doc=("Numer dokumentu", lambda s: str(s.iloc[0]).strip()),
-        )
+    # --- AGREGACJA: tylko po kontrahencie (bez dnia) ---
+    dates = (
+        df.groupby("__grp_key")["__data_str"]
+          .agg(["min", "max"])
+          .rename(columns={"min": "data_min", "max": "data_max"})
+          .reset_index()
     )
-    agg["data_platnosci"] = agg["__data_str"].map(lambda d: add_days_to_date_str(d, 30))
-    agg["data_wplywu_ddmmyy"] = agg["__data_str"].map(
-        lambda d: datetime.strptime(d, "%Y%m%d").strftime("%d%m%y")
+
+    agg_core = (
+        df.groupby("__grp_key", as_index=False)
+          .agg(
+              nip_clean=("__nip_clean", "first"),
+              kontrahent=("Kontrahent", lambda s: str(s.iloc[0])),
+              suma_brutto=("__brutto_gr", "sum"),
+              suma_vat=("__vat_gr", "sum"),
+              cnt=("Numer dokumentu", "count"),
+              first_doc=("Numer dokumentu", lambda s: str(s.iloc[0]).strip()),
+          )
     )
+
+    agg = agg_core.merge(dates, on="__grp_key", how="left")
+
+    def _safe_add30(s_min: str | None, s_max: str | None) -> str:
+        base = s_max or s_min
+        return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
+
+    agg["data_platnosci"] = [
+        _safe_add30(r.data_min, r.data_max) for r in agg.itertuples(index=False)
+    ]
+    agg["data_wplywu_ddmmyy"] = [
+        datetime.strptime((r.data_max or r.data_min), "%Y%m%d").strftime("%d%m%y")
+        for r in agg.itertuples(index=False)
+    ]
 
     adres_cache: dict[str, str] = {}
     konto_cache: dict[str, str] = {}
     lines: list[str] = []
 
-    if merged_csv is None:
-        merged_csv = os.path.join(OUTPUT_DIR, f"raport_scalonych_{ts}.csv")
-    if per_group_dir:
-        os.makedirs(per_group_dir, exist_ok=True)
-
     def _safe_name(s: str) -> str:
         s = str(s or "").strip()
         return re.sub(r"[^0-9A-Za-z_.-]+", "_", s)[:80]
 
+    # ---------- RAPORTY CSV ----------
     raport_wiersze = []
 
     for _, row in agg.iterrows():
         grp_key = row["__grp_key"]
-        data_str = row["__data_str"]
         nip_clean = str(row["nip_clean"] or "")
         valid_nip = len(nip_clean) == 10 and nip_clean.isdigit()
         kontrahent_name = str(row["kontrahent"])
@@ -627,36 +599,36 @@ def przetworz_plik_xlsx(
         suma_brutto = int(row["suma_brutto"])
         suma_vat = int(row["suma_vat"])
 
-        sub = df.loc[(df["__grp_key"] == grp_key) & (df["__data_str"] == data_str)].copy()
+        # wszystkie wiersze tego kontrahenta (niezależnie od daty)
+        sub = df.loc[df["__grp_key"] == grp_key].copy()
 
-        # raporty CSV raporty/kontrahent/data/nip_{nip}_data
+        # (opcjonalnie) zapis CSV per kontrahent/per data
         if per_group_dir:
             kontrahent_poprawna_nazwa = sanitize_nazwa_folderu(kontrahent_name)
-
-            # katalog: raporty/KONTRAHENT/2025-08-26/
             kontrahent_dir = os.path.join(per_group_dir, kontrahent_poprawna_nazwa)
-            date_dir = os.path.join(kontrahent_dir, data_str)
-            os.makedirs(date_dir, exist_ok=True)
+            os.makedirs(kontrahent_dir, exist_ok=True)
 
-            cols = [c for c in ["Numer dokumentu", "Netto", "VAT", "Brutto", "Opis"] if c in sub.columns]
-            sub_out = sub[cols].copy()
+            for data_str in sorted(sub["__data_str"].unique()):
+                date_dir = os.path.join(kontrahent_dir, data_str)
+                os.makedirs(date_dir, exist_ok=True)
 
-            # plik: nip_1234567890_20250826.csv
-            if valid_nip:
-                fname = f"{nip_clean}.csv"
-            else:
-                fname = f"name_{_safe_name(kontrahent_poprawna_nazwa)}.csv"
+                cols = [c for c in ["Numer dokumentu", "Netto", "VAT", "Brutto", "Opis"] if c in sub.columns]
+                sub_out = sub.loc[sub["__data_str"] == data_str, cols].copy()
 
-            out_path = os.path.join(date_dir, fname)
-            sub_out.to_csv(out_path, index=False, encoding="utf-8-sig")
-            print(f"[RAPORT] Zapisano plik: {out_path}")
+                if valid_nip:
+                    fname = f"nip_{nip_clean}_{data_str}.csv"
+                else:
+                    fname = f"name_{_safe_name(kontrahent_poprawna_nazwa)}_{data_str}.csv"
 
-        # wpis do raportu zbiorczego
+                out_path = os.path.join(date_dir, fname)
+                sub_out.to_csv(out_path, index=False, encoding="utf-8-sig")
+                print(f"[RAPORT] Zapisano plik: {out_path}")
+
+        # raport zbiorczy (jedna linia na kontrahenta)
         doc_list = [str(x).strip() for x in sub["Numer dokumentu"].tolist() if str(x).strip()]
         docs_joined = " | ".join(doc_list)
         raport_wiersze.append({
             "grp_key": grp_key,
-            "data": data_str,
             "nip": nip_clean if valid_nip else "",
             "kontrahent": kontrahent_name,
             "liczba_faktur": cnt_docs,
@@ -670,13 +642,12 @@ def przetworz_plik_xlsx(
     if per_group_dir:
         print(f"[RAPORT] Osobne CSV w katalogu: {per_group_dir}")
 
-    # --- generowanie pliku ELIXIR ---
+    # ---------- PLIKI ELIXIR ----------
     with RegonScraper(CHROMEDRIVER_PATH, headless=headless) as scraper:
         for _, row in agg.iterrows():
             nip_clean = str(row["nip_clean"] or "")
             valid = len(nip_clean) == 10 and nip_clean.isdigit()
             kontrahent_name = row["kontrahent"]
-            data_platnosci = row["data_platnosci"]
             kw_brutto_gr = int(row["suma_brutto"])
             kw_vat_gr = int(row["suma_vat"])
             cnt_docs = int(row["cnt"])
@@ -690,25 +661,23 @@ def przetworz_plik_xlsx(
                 if nip_clean in konto_cache:
                     rachunek_kontrahenta = konto_cache[nip_clean]
                 else:
-                    rachunek_kontrahenta = get_or_fetch_konto(nip_clean) or "0"*26
+                    rachunek_kontrahenta = get_or_fetch_konto(nip_clean) or "0" * 26
                     konto_cache[nip_clean] = rachunek_kontrahenta
             else:
                 adres_kontr = kontrahent_name
-                rachunek_kontrahenta = "0"*26
+                rachunek_kontrahenta = "0" * 26
 
             adres_kontr = clean_address(adres_kontr)
             nr_rozliczeniowy_banku_kontrahenta = bank_code_from_nrb(rachunek_kontrahenta)
 
-            # doc_for_ref = str(row["first_doc"] or "").strip()
             nip_for_ref = nip_clean if valid else "NA"
-            data_wplywu = row["data_wplywu_ddmmyy"]  # <- pewna data z tej konkretnej grupy
+            data_wplywu = row["data_wplywu_ddmmyy"]  # ddmmyy z data_max (lub data_min)
             informacja = trim_to(f"{nip_for_ref}{data_wplywu}", 19)
-            prefix = f"{nip_for_ref}{data_wplywu}"
-            informacja = trim_to(prefix, 19)
+
             szczegoly = f"/NIP/{nip_clean or 'NA'}|/CNT/{cnt_docs}|/VAT/{kw_vat_gr}|/AMT/{kw_brutto_gr}"
 
             line = build_payment_record(
-                data_platnosci=data_platnosci,
+                data_platnosci=row["data_platnosci"],
                 kwota_brutto_gr=kw_brutto_gr,
                 nr_rozliczeniowy_zleceniodawcy=nr_rozliczeniowy_zleceniodawcy,
                 tryb_realizacji=tryb_realizacji,
@@ -728,16 +697,18 @@ def przetworz_plik_xlsx(
         try:
             line.encode(OUTPUT_ENCODING, errors="strict")
         except UnicodeEncodeError as e:
-            print(f"[ENC] Linia {i}: niekodowalne znaki {repr(line[e.start:e.end])}")
+            bad = line[e.start:e.end]
+            print(f"[ENC] Linia {i}: niekodowalne znaki {repr(bad)} → zostaną zastąpione '?'")
 
+    payload = _latin_safe_join(lines)
     with open(output_path, "w", encoding=OUTPUT_ENCODING, newline="") as f:
-        f.write(_latin_safe_join(lines))
+        f.write(payload)
 
-    print(f"Zapisano {len(lines)} rekordów (po agregacji) do: {output_path} (encoding={OUTPUT_ENCODING})")
+    print(f"Zapisano {len(lines)} rekordów (po agregacji po kontrahencie) do: {output_path} (encoding={OUTPUT_ENCODING})")
 
 # --- CLI aplikacji ---
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Generator pliku ELIXIR-0 dla mBanku ")
+    parser = ArgumentParser(description="Generator pliku ELIXIR-0 dla mBanku")
     parser.add_argument("input", help="Ścieżka do XLSX z fakturami")
     parser.add_argument("-o", "--output", help="Ścieżka wyjściowa .txt (domyślnie: ./<firma>_przelewy_<ts>.txt)")
     parser.add_argument("-c", "--company",
@@ -749,12 +720,11 @@ if __name__ == "__main__":
                         default="warn",
                         help="Obsługa duplikatów (domyślnie: warn)")
     parser.add_argument("--headless", action=BooleanOptionalAction, default=True,
-                        help="Selenium w trybie bez otwarcia (domyślnie: włączony)")
+                        help="Selenium w trybie bez okna (domyślnie: włączony)")
     parser.add_argument("--merged-csv",
                         help="Ścieżka zbiorczego CSV z raportem scalonych grup (domyślnie: ./raport_scalonych_<ts>.csv)")
-
     parser.add_argument("--per-group-dir",
-                        help="Katalog na osobne CSV dla każdej grupy (kontrahent+dzień). Jeśli nie podasz – nie tworzy.")
+                        help="Katalog na osobne CSV per kontrahent/per data; jeśli nie podasz – nie tworzy.")
 
     args = parser.parse_args()
 
@@ -767,17 +737,3 @@ if __name__ == "__main__":
         merged_csv=args.merged_csv,
         per_group_dir=args.per_group_dir,
     )
-
-
-#######################
-# INSTRUKCJA OBSUGI CLI
-#######################
-
-# Shumme, wyjście automatycznie nazwane:
-# py elixir_cli.py ".\plik_testowy.xlsx" -c shumme
-
-# Greatstore, własna ścieżka wyjściowa i blokowanie duplikatów:
-# py elixir_cli.py ".\plik_testowy.xlsx" -c greatstore -o ".\export\greatstore_elixir.txt" --dup error
-
-# Superstore, z włączoną widoczną przeglądarką (debug scrapera):
-# py elixir_cli.py ".\plik_testowy.xlsx" -c superstore --no-headless
