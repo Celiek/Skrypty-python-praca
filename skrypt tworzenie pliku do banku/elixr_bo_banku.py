@@ -77,24 +77,147 @@ OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
 # Normalizacja / kodowanie
 # =========================
 
-_ELIXIR_SAFE_MAP = {
-    "\u2018": "'", "\u2019": "'",
-    "\u201C": '"', "\u201D": '"', "\u201E": '"',
-    "\u2013": "-", "\u2014": "-",
-    "\u00A0": " ",
-    "\u2026": "...",
-    "\u2007": " ",
-    "\u2009": " ",
-    "\u00AD": "-",
-    "-": "-",
-}
+# --- WALIDACJA DANYCH ---
 
-def _elixir_safe_text(s: str) -> str:
-    if s is None:
-        return ""
-    t = unicodedata.normalize("NFKC", str(s))
-    t = t.translate(str.maketrans(_ELIXIR_SAFE_MAP))
-    return t
+def validate_df(
+    df: pd.DataFrame,
+    *,
+    date_col: str = "Data wpływu",
+    netto_col: str = "Netto",
+    vat_col: str = "VAT",
+    brutto_col: str = "Brutto",
+    tol: float = 0.01,
+    on_error: str = "skip",   # 'skip' | 'keep' | 'raise'
+) -> tuple[pd.DataFrame, list[dict]]:
+    required = {date_col, netto_col, vat_col, brutto_col}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Brak kolumn: {', '.join(sorted(missing))}")
+
+    d = df.copy()
+    error_log: list[dict] = []
+
+    def _to_num_cell(x):
+        if pd.isna(x):
+            return pd.NA
+        s = str(x).strip()
+        s = (s.replace("\u00A0", "")
+               .replace("\u202F", "")
+               .replace(" ", "")
+               .replace("−", "-")
+               .replace("–", "-")
+               .replace("—", "-"))
+        if s.startswith("(") and s.endswith(")"):
+            s = "-" + s[1:-1]
+        if s.endswith("-") and s.count("-") == 1:
+            s = "-" + s[:-1]
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return pd.NA
+
+    d["_netto_num"]  = d[netto_col].apply(_to_num_cell)
+    d["_vat_num"]    = d[vat_col].apply(_to_num_cell)
+    d["_brutto_num"] = d[brutto_col].apply(_to_num_cell)
+
+    # --- log nie-liczb ---
+    for col_name, num_col, tag in [
+        (netto_col,  "_netto_num",  "bad_number_netto"),
+        (vat_col,    "_vat_num",    "bad_number_vat"),
+        (brutto_col, "_brutto_num", "bad_number_brutto"),
+    ]:
+        mask = d[num_col].isna()
+        for idx in d.index[mask]:
+            error_log.append({
+                "type": tag,
+                "row": int(idx),
+                "doc": str(d.loc[idx].get("Numer dokumentu", "")),
+                "value": d.loc[idx, col_name],
+                "msg": f"{col_name}: nie-liczbowe/NaN"
+            })
+
+    # --- ujemne wartości -> tylko LOG (nie błąd blokujący) ---
+    for num_col, orig_col, tag in [
+        ("_netto_num",  netto_col,  "negative_netto"),
+        ("_vat_num",    vat_col,    "negative_vat"),
+        ("_brutto_num", brutto_col, "negative_brutto"),
+    ]:
+        mask = (d[num_col] < 0).fillna(False)
+        for idx in d.index[mask]:
+            error_log.append({
+                "type": tag,
+                "row": int(idx),
+                "doc": str(d.loc[idx].get("Numer dokumentu", "")),
+                "value": d.loc[idx, orig_col],
+                "msg": f"{orig_col}: wartość ujemna (korekta)"
+            })
+
+    # --- spójność kwot ---
+    diff = (d["_brutto_num"] - (d["_netto_num"] + d["_vat_num"])).abs()
+    mask_sum_mismatch = (diff > tol).fillna(False)
+    for idx in d.index[mask_sum_mismatch]:
+        error_log.append({
+            "type": "sum_mismatch",
+            "row": int(idx),
+            "doc": str(d.loc[idx].get("Numer dokumentu", "")),
+            "netto": d.loc[idx, netto_col],
+            "vat": d.loc[idx, vat_col],
+            "brutto": d.loc[idx, brutto_col],
+            "diff": float(diff.loc[idx]),
+            "msg": f"Niespójność sumy > {tol}"
+        })
+
+    # --- data -> __data_str ---
+    def _safe_date(val):
+        try:
+            return serializacja_dat(val)
+        except Exception:
+            return None
+
+    d["__data_str"] = d[date_col].map(_safe_date)
+    mask_bad_date = d["__data_str"].isna()
+    for idx in d.index[mask_bad_date]:
+        error_log.append({
+            "type": "bad_date",
+            "row": int(idx),
+            "doc": str(d.loc[idx].get("Numer dokumentu", "")),
+            "value": d.loc[idx, date_col],
+            "msg": "Błąd serializacji daty"
+        })
+
+    # 🚨 UJEMNE KWOTY NIE są błędem blokującym
+    any_error = (
+        d["_netto_num"].isna()  |
+        d["_vat_num"].isna()    |
+        d["_brutto_num"].isna() |
+        mask_sum_mismatch       |
+        mask_bad_date
+    )
+
+    if on_error == "skip":
+        d = d.loc[~any_error].copy()
+    elif on_error == "raise":
+        if any_error.any():
+            raise ValueError(f"Wykryto błędy walidacji w {int(any_error.sum())} wierszach.")
+    elif on_error != "keep":
+        raise ValueError("validate_df.on_error ∈ {'skip','keep','raise'}")
+
+    # nadpisz kolumny na floaty
+    d[netto_col]  = d["_netto_num"].astype(float)
+    d[vat_col]    = d["_vat_num"].astype(float)
+    d[brutto_col] = d["_brutto_num"].astype(float)
+
+    d.drop(columns=[c for c in d.columns if c.startswith("_") and c != "__data_str"],
+           inplace=True, errors="ignore")
+    return d, error_log
+
 
 def sanitize_text(text: str) -> str:
     """Usuwa zabronione znaki i nadmiarowe spacje."""
@@ -120,19 +243,10 @@ def sanitize_nazwa_folderu(text: str) -> str:
     cleaned = "".join(c for c in str(text) if c not in bad)
     return " ".join(cleaned.split())
 
-def _latin_safe(s: str) -> str:
-    """Bezpieczne rzutowanie do OUTPUT_ENCODING; spoza zakresu → '?'."""
-    return s.encode(OUTPUT_ENCODING, errors="replace").decode(OUTPUT_ENCODING)
-
-def _latin_safe_join(lines: list[str]) -> str:
-    return "\n".join(_latin_safe(line) for line in lines)
 
 # ===========================================
 # Utils
 # ===========================================
-
-def losowe_opoznienie(min_sec=0.05, max_sec=0.1):
-    time.sleep(random.uniform(min_sec, max_sec))
 
 def nip_digits(nip: str) -> str:
     return re.sub(r"\D", "", str(nip or ""))
@@ -257,7 +371,9 @@ def nr_konta_z_bazy(nip: str):
     rec = db_fetchone("SELECT nr_konta FROM Merchanci WHERE nip = %s", (nip_num,))
     if rec and rec.get("nr_konta"):
         return rec["nr_konta"]
-    return None
+    else:
+        print(f"Brak nr konta w bazie dla nipu :{nip}")
+        return None
 
 def zapisz_adres_do_bazy(nip: str, adres: str):
     nip_num = int(nip_digits(nip))
@@ -279,10 +395,40 @@ def adres_z_bazy(nip: str) -> str | None:
     nip_num = int(nip_digits(nip))
     rec = db_fetchone("SELECT adres FROM merchanci WHERE nip = %s", (nip_num,))
     return clean_address(rec["adres"]) if rec and rec.get("adres") else None
+_ELIXIR_SAFE_MAP = {
+    "\u2018": "'", "\u2019": "'",
+    "\u201C": '"', "\u201D": '"', "\u201E": '"',
+    "\u2013": "-", "\u2014": "-",
+    "\u00A0": " ",
+    "\u2026": "...",
+    "\u2007": " ",
+    "\u2009": " ",
+    "\u00AD": "-",
+    "-": "-",
+}
+
+def _elixir_safe_text(s: str) -> str:
+    if s is None:
+        return ""
+    t = unicodedata.normalize("NFKC", str(s))
+    t = t.translate(str.maketrans(_ELIXIR_SAFE_MAP))
+    return t
+
+def losowe_opoznienie(min_sec=0.05, max_sec=0.1):
+    time.sleep(random.uniform(min_sec, max_sec))
+
+def _latin_safe(s: str) -> str:
+    return s.encode(OUTPUT_ENCODING, errors="replace").decode(OUTPUT_ENCODING)
+
+def _latin_safe_join(lines: list[str]) -> str:
+    return "\n".join(_latin_safe(line) for line in lines)
+
+
 
 # =========================
 # Scraper REGON (Selenium)
 # =========================
+
 
 class RegonScraper:
     """Jedna przeglądarka na cały wsad."""
@@ -431,6 +577,7 @@ def find_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     d["__netto_gr"] = _money_to_gr_series(df["Netto"])
     d["__vat_gr"]   = _money_to_gr_series(df["VAT"])
     d["__brut_gr"]  = _money_to_gr_series(df["Brutto"])
+    df["Brutto"].apply(money_to_grosze)
 
     mdup = d.duplicated(subset=["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"], keep="first")
     group_sizes = d.groupby(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])["Numer dokumentu"].transform("size")
@@ -470,12 +617,6 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
     full_dups[cols].to_csv(out_path, index=False, encoding="utf-8")
     print(f"[DUP] Raport duplikatów zapisany: {out_path}")
 
-def _safe_serializacja(x) -> str:
-    try:
-        return serializacja_dat(x)
-    except Exception:
-        return datetime.now().strftime("%Y%m%d")
-
 def _group_key(row) -> str:
     """NIP (10 cyfr) albo fallback na nazwę kontrahenta."""
     nipc = nip_digits(row.get("NIP", ""))
@@ -483,6 +624,10 @@ def _group_key(row) -> str:
         return nipc
     name = str(row.get("Kontrahent", "")).strip().upper()
     return f"NAME::{name}"
+
+def _safe_add30(s_min: str | None, s_max: str | None) -> str:
+    base = s_max or s_min
+    return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
 
 # =========================
 # GŁÓWNA FUNKCJA
@@ -498,7 +643,10 @@ def przetworz_plik_xlsx(
     merged_csv: Optional[str] = None,
     per_group_dir: Optional[str] = None,
 ):
-    # walidacja spółki
+    # Lista błędów (w pamięci)
+    error_log: list[dict] = []
+
+    # --- walidacja spółki ---
     key = company.strip().lower()
     if key not in COMPANIES:
         raise ValueError(f"Nieznana firma: {company}. Dozwolone: {', '.join(sorted(COMPANIES))}")
@@ -510,13 +658,13 @@ def przetworz_plik_xlsx(
     tryb_realizacji = "0"
     klasyfikacja = "01"
 
-    # sanity check danych firmy
+    # sanity check nadawcy
     if len(re.sub(r"\D", "", rachunek_zleceniodawcy)) != 26:
         raise ValueError(f"NRB nadawcy ma niepoprawną długość (26 cyfr): {rachunek_zleceniodawcy}")
     if not re.fullmatch(r"\d{8}", nr_rozliczeniowy_zleceniodawcy):
         raise ValueError(f"Kod rozliczeniowy nadawcy musi mieć 8 cyfr: {nr_rozliczeniowy_zleceniodawcy}")
 
-    # przygotowanie ścieżek wyjścia
+    # --- ścieżki wyjścia ---
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     if not output_path:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -526,8 +674,8 @@ def przetworz_plik_xlsx(
     if per_group_dir:
         os.makedirs(per_group_dir, exist_ok=True)
 
-    # wczytanie danych + obsługa duplikatów + walidacja kolumn
-    df = pd.read_excel(input_file)
+    # --- wczytanie + duplikaty + kolumny ---
+    df = pd.read_excel(input_file, decimal=",")
     df = handle_duplicates(df, action=duplicates_action)
     export_duplicates_report(df, os.path.join(OUTPUT_DIR, f"duplikaty_{ts}.csv"))
 
@@ -536,40 +684,99 @@ def przetworz_plik_xlsx(
     if brak:
         raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
 
-    # przygotowanie do agregacji
-    df = df.copy()
-    df["__nip_clean"] = df["NIP"].map(nip_digits)
-    df["__is_valid_nip"] = df["__nip_clean"].map(lambda x: len(x) == 10 and x.isdigit())
-    df["__grp_key"] = df.apply(_group_key, axis=1)
-    df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
-    df["__vat_gr"] = df["VAT"].apply(money_to_grosze)
-    df["__data_str"] = df["Data wpływu"].map(_safe_serializacja)  # YYYYMMDD string
-
-    # --- AGREGACJA: tylko po kontrahencie (bez dnia) ---
-    dates = (
-        df.groupby("__grp_key")["__data_str"]
-          .agg(["min", "max"])
-          .rename(columns={"min": "data_min", "max": "data_max"})
-          .reset_index()
+    # --- WALIDACJA (tworzy __data_str; NIE wycina ujemnych) ---
+    df, error_log = validate_df(
+        df,
+        date_col="Data wpływu",
+        netto_col="Netto",
+        vat_col="VAT",
+        brutto_col="Brutto",
+        tol=0.01,
+        on_error="keep"  # trzymamy wszystkie wiersze; ujemne tylko logowane
     )
+    print(f"[VALID] Wykryto {len(error_log)} błędów. (trzymane w pamięci w zmiennej error_log)")
+    if error_log:
+        from collections import Counter
+        c = Counter(e["type"] for e in error_log)
+        print("[VALID] Rozkład błędów:", dict(c))
 
-    agg_core = (
-        df.groupby("__grp_key", as_index=False)
+    if df.empty:
+        with open(output_path, "w", encoding=OUTPUT_ENCODING, newline="") as f:
+            f.write("")
+        print(f"[INFO] Po walidacji brak poprawnych wierszy. Zapisano pusty plik: {output_path}")
+        return
+
+    # --- przygotowanie do agregacji ---
+    df = df.copy()
+    print(f"[INFO] Wszystkie wiersze po walidacji: {len(df)}")
+
+    # klucze i kwoty w groszach
+    df["__nip_clean"]   = df["NIP"].map(nip_digits)
+    df["__is_valid_nip"] = df["__nip_clean"].map(lambda x: len(x) == 10 and x.isdigit())
+    df["__grp_key"]     = df.apply(_group_key, axis=1)
+    df["__doc_no_norm"] = df["Numer dokumentu"].map(_norm_doc_no)
+
+    df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
+    df["__vat_gr"]    = df["VAT"].apply(money_to_grosze)
+    df["__netto_gr"]  = df["Netto"].apply(money_to_grosze)
+
+    print("Wiersze przed agregacją:", len(df))
+    print("Unikalne klucze grup (kontrahent):", df["__grp_key"].nunique())
+    print(df["__grp_key"].value_counts().head(10))
+
+    # === KROK 1: AGREGACJA DO POZIOMU FAKTURY ===
+    # Jedna faktura = jeden rekord (eliminuje powielanie pozycji/wierszy).
+    per_invoice = (
+        df.groupby(["__grp_key", "__doc_no_norm"], as_index=False)
           .agg(
-              nip_clean=("__nip_clean", "first"),
-              kontrahent=("Kontrahent", lambda s: str(s.iloc[0])),
-              suma_brutto=("__brutto_gr", "sum"),
-              suma_vat=("__vat_gr", "sum"),
-              cnt=("Numer dokumentu", "count"),
-              first_doc=("Numer dokumentu", lambda s: str(s.iloc[0]).strip()),
+              nip_clean   = ("__nip_clean", "first"),
+              kontrahent  = ("Kontrahent", "first"),
+              brutto_gr   = ("__brutto_gr", "sum"),
+              vat_gr      = ("__vat_gr", "sum"),
+              netto_gr    = ("__netto_gr", "sum"),
+              data_min    = ("__data_str", "min"),
+              data_max    = ("__data_str", "max"),
           )
     )
 
-    agg = agg_core.merge(dates, on="__grp_key", how="left")
+    nip_test = "1230059322"  # <- tutaj wstaw NIP z końcówką 322
+    df_nip = df[df["__grp_key"] == nip_test].copy()
+    print("[DBG] Wiersze dla NIP", nip_test, ":", len(df_nip))
+    print(df_nip[["Numer dokumentu", "Brutto", "__brutto_gr"]].head(50))
 
-    def _safe_add30(s_min: str | None, s_max: str | None) -> str:
-        base = s_max or s_min
-        return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
+    print("[DBG] Liczba unikalnych dokumentów:", df_nip["__doc_no_norm"].nunique())
+    print("[DBG] Kwota brutto suma w zł:", df_nip["Brutto"].sum())
+    print("[DBG] Kwota brutto suma w groszach:", df_nip["__brutto_gr"].sum())
+
+    # po agregacji do faktury
+    per_inv_nip = per_invoice[per_invoice["__grp_key"] == nip_test]
+    print("[DBG] Faktur po agregacji:", len(per_inv_nip))
+    print("[DBG] Suma brutto po agregacji (gr):", per_inv_nip["brutto_gr"].sum())
+
+    # szybka diagnostyka — ile unikalnych faktur na NIP
+    inv_counts = per_invoice.groupby("__grp_key")["__doc_no_norm"].nunique().sort_values(ascending=False)
+    print("[DIAG] Unikalne faktury per kontrahent (po zrolowaniu do faktury):")
+    print(inv_counts.head(20))
+
+    # (opcjonalne kubły czasu)
+    per_invoice["day_bucket"]   = per_invoice["data_max"]      # YYYYMMDD
+    per_invoice["month_bucket"] = per_invoice["data_max"].str[:6]  # YYYYMM
+
+    # === KROK 2: AGREGACJA DO POZIOMU KONTRAHENTA ===
+    agg = (
+        per_invoice.groupby("__grp_key", as_index=False)
+          .agg(
+              nip_clean    = ("nip_clean", "first"),
+              kontrahent   = ("kontrahent", "first"),
+              suma_brutto  = ("brutto_gr", "sum"),
+              suma_vat     = ("vat_gr", "sum"),
+              suma_netto   = ("netto_gr", "sum"),
+              cnt          = ("__doc_no_norm", "nunique"),
+              data_min     = ("data_min", "min"),
+              data_max     = ("data_max", "max"),
+              first_doc    = ("__doc_no_norm", "first"),
+          )
+    )
 
     agg["data_platnosci"] = [
         _safe_add30(r.data_min, r.data_max) for r in agg.itertuples(index=False)
@@ -583,64 +790,59 @@ def przetworz_plik_xlsx(
     konto_cache: dict[str, str] = {}
     lines: list[str] = []
 
+    # ---------- RAPORT ZBIORCZY ----------
+    raport_wiersze = []
+
     def _safe_name(s: str) -> str:
         s = str(s or "").strip()
         return re.sub(r"[^0-9A-Za-z_.-]+", "_", s)[:80]
-
-    # ---------- RAPORTY CSV ----------
-    raport_wiersze = []
 
     for _, row in agg.iterrows():
         grp_key = row["__grp_key"]
         nip_clean = str(row["nip_clean"] or "")
         valid_nip = len(nip_clean) == 10 and nip_clean.isdigit()
         kontrahent_name = str(row["kontrahent"])
-        cnt_docs = int(row["cnt"])
+
+        # unikalne numery faktur do raportu (BEZ duplikatów)
+        unique_docs = per_invoice.loc[per_invoice["__grp_key"] == grp_key, "__doc_no_norm"].tolist()
+        cnt_docs    = len(unique_docs)
         suma_brutto = int(row["suma_brutto"])
-        suma_vat = int(row["suma_vat"])
+        suma_vat    = int(row["suma_vat"])
 
-        # wszystkie wiersze tego kontrahenta (niezależnie od daty)
-        sub = df.loc[df["__grp_key"] == grp_key].copy()
-
-        # (opcjonalnie) zapis CSV per kontrahent/per data
+        # (opcjonalnie) eksport CSV per data – bazuj na per_invoice, nie na "df" (żeby nie duplikować)
         if per_group_dir:
             kontrahent_poprawna_nazwa = sanitize_nazwa_folderu(kontrahent_name)
             kontrahent_dir = os.path.join(per_group_dir, kontrahent_poprawna_nazwa)
             os.makedirs(kontrahent_dir, exist_ok=True)
 
-            for data_str in sorted(sub["__data_str"].unique()):
-                date_dir = os.path.join(kontrahent_dir, data_str)
-                os.makedirs(date_dir, exist_ok=True)
+            # snapshot faktur z datami (data_max jako "dzień faktury")
+            snap = per_invoice.loc[per_invoice["__grp_key"] == grp_key,
+                                   ["__doc_no_norm","netto_gr","vat_gr","brutto_gr","data_max"]].copy()
+            snap.rename(columns={
+                "__doc_no_norm":"Numer dokumentu",
+                "netto_gr":"Netto_gr",
+                "vat_gr":"VAT_gr",
+                "brutto_gr":"Brutto_gr",
+                "data_max":"Data_faktury_YYYYMMDD"
+            }, inplace=True)
 
-                cols = [c for c in ["Numer dokumentu", "Netto", "VAT", "Brutto", "Opis"] if c in sub.columns]
-                sub_out = sub.loc[sub["__data_str"] == data_str, cols].copy()
+            out_path = os.path.join(kontrahent_dir, f"faktury_{nip_clean or _safe_name(kontrahent_name)}.csv")
+            snap.to_csv(out_path, index=False, encoding="utf-8-sig")
+            print(f"[RAPORT] Zapisano plik: {out_path}")
 
-                if valid_nip:
-                    fname = f"nip_{nip_clean}_{data_str}.csv"
-                else:
-                    fname = f"name_{_safe_name(kontrahent_poprawna_nazwa)}_{data_str}.csv"
-
-                out_path = os.path.join(date_dir, fname)
-                sub_out.to_csv(out_path, index=False, encoding="utf-8-sig")
-                print(f"[RAPORT] Zapisano plik: {out_path}")
-
-        # raport zbiorczy (jedna linia na kontrahenta)
-        doc_list = [str(x).strip() for x in sub["Numer dokumentu"].tolist() if str(x).strip()]
-        docs_joined = " | ".join(doc_list)
         raport_wiersze.append({
             "grp_key": grp_key,
             "nip": nip_clean if valid_nip else "",
             "kontrahent": kontrahent_name,
             "liczba_faktur": cnt_docs,
+            "suma_netto_gr": int(row["suma_netto"]),
+            "suma_vat_gr":   suma_vat,
             "suma_brutto_gr": suma_brutto,
-            "suma_vat_gr": suma_vat,
-            "faktury": docs_joined,
+            "faktury": " | ".join(unique_docs),
         })
 
     pd.DataFrame(raport_wiersze).to_csv(merged_csv, index=False, encoding="utf-8-sig")
     print(f"[RAPORT] Zapisano zbiorczy raport scalonych grup: {merged_csv}")
-    if per_group_dir:
-        print(f"[RAPORT] Osobne CSV w katalogu: {per_group_dir}")
 
     # ---------- PLIKI ELIXIR ----------
     with RegonScraper(CHROMEDRIVER_PATH, headless=headless) as scraper:
@@ -671,7 +873,7 @@ def przetworz_plik_xlsx(
             nr_rozliczeniowy_banku_kontrahenta = bank_code_from_nrb(rachunek_kontrahenta)
 
             nip_for_ref = nip_clean if valid else "NA"
-            data_wplywu = row["data_wplywu_ddmmyy"]  # ddmmyy z data_max (lub data_min)
+            data_wplywu = row["data_wplywu_ddmmyy"]  # ddmmyy z max/min
             informacja = trim_to(f"{nip_for_ref}{data_wplywu}", 19)
 
             szczegoly = f"/NIP/{nip_clean or 'NA'}|/CNT/{cnt_docs}|/VAT/{kw_vat_gr}|/AMT/{kw_brutto_gr}"
@@ -692,7 +894,7 @@ def przetworz_plik_xlsx(
             )
             lines.append(line)
 
-    # zapis ELIXIR
+    # --- zapis ELIXIR ---
     for i, line in enumerate(lines, start=1):
         try:
             line.encode(OUTPUT_ENCODING, errors="strict")
@@ -700,11 +902,12 @@ def przetworz_plik_xlsx(
             bad = line[e.start:e.end]
             print(f"[ENC] Linia {i}: niekodowalne znaki {repr(bad)} → zostaną zastąpione '?'")
 
-    payload = _latin_safe_join(lines)
     with open(output_path, "w", encoding=OUTPUT_ENCODING, newline="") as f:
-        f.write(payload)
+        f.write(_latin_safe_join(lines))
 
     print(f"Zapisano {len(lines)} rekordów (po agregacji po kontrahencie) do: {output_path} (encoding={OUTPUT_ENCODING})")
+
+
 
 # --- CLI aplikacji ---
 if __name__ == "__main__":
