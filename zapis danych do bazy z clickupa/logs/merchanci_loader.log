@@ -1,0 +1,20 @@
+2025-09-02 13:46:55.820 [INFO] merchanci:56 - Logowanie zainicjalizowane → logs\merchanci_loader.log
+2025-09-02 13:46:55.834 [INFO] merchanci:294 - Start wczytywania pliku: clickup_tasks_clean(1).xlsx
+2025-09-02 13:46:56.382 [INFO] merchanci:300 - Wczytano arkusz: 1446 wierszy, 44 kolumn
+2025-09-02 13:46:56.820 [INFO] merchanci:352 - Znormalizowano: 1446 wierszy, 31 kolumn
+2025-09-02 13:58:56.473 [INFO] merchanci:56 - Logowanie zainicjalizowane → logs\merchanci_loader.log
+2025-09-02 13:58:56.477 [INFO] merchanci:294 - Start wczytywania pliku: clickup_tasks_clean(1).xlsx
+2025-09-02 13:58:56.982 [INFO] merchanci:300 - Wczytano arkusz: 1446 wierszy, 44 kolumn
+2025-09-02 13:58:57.416 [INFO] merchanci:352 - Znormalizowano: 1446 wierszy, 31 kolumn
+2025-09-02 13:59:08.345 [INFO] merchanci:56 - Logowanie zainicjalizowane → logs\merchanci_loader.log
+2025-09-02 13:59:08.349 [INFO] merchanci:294 - Start wczytywania pliku: clickup_tasks_clean(1).xlsx
+2025-09-02 13:59:08.842 [INFO] merchanci:300 - Wczytano arkusz: 1446 wierszy, 44 kolumn
+2025-09-02 13:59:09.258 [INFO] merchanci:352 - Znormalizowano: 1446 wierszy, 31 kolumn
+2025-09-02 13:59:19.993 [INFO] merchanci:56 - Logowanie zainicjalizowane → logs\merchanci_loader.log
+2025-09-02 13:59:19.996 [INFO] merchanci:294 - Start wczytywania pliku: clickup_tasks_clean(1).xlsx
+2025-09-02 13:59:20.501 [INFO] merchanci:300 - Wczytano arkusz: 1446 wierszy, 44 kolumn
+2025-09-02 13:59:20.902 [INFO] merchanci:352 - Znormalizowano: 1446 wierszy, 31 kolumn
+2025-09-02 14:00:24.250 [INFO] merchanci:56 - Logowanie zainicjalizowane → logs\merchanci_loader.log
+2025-09-02 14:00:24.254 [INFO] merchanci:294 - Start wczytywania pliku: clickup_tasks_clean(1).xlsx
+2025-09-02 14:00:24.730 [INFO] merchanci:300 - Wczytano arkusz: 1446 wierszy, 44 kolumn
+2025-09-02 14:00:25.142 [INFO] merchanci:352 - Znormalizowano: 1446 wierszy, 31 kolumn

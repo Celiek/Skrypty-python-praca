@@ -22,8 +22,8 @@ import json
 import requests
 
 # TODO
-# Zmiana nazwy plkiku na kolumne 17 elixir
-# ujemne pozycje nie mogą być uwzględnianie w agregacji faktur
+# Zmiana nazwy plkiku na kolumne 17 elixir DONE
+# ujemne pozycje nie mogą być uwzględnianie w agregacji faktur DONE
 # zmienić agregację przelewów po nipie i dacie DONE - check first
 # Dodać cachowanie danych do pliku żeby nie palić dziennego limitu
 # zapytań do whitelisty vatowców
@@ -781,7 +781,7 @@ def przetworz_plik_xlsx(
         raise ValueError(f"Kod rozliczeniowy nadawcy musi mieć 8 cyfr: {nr_rozliczeniowy_zleceniodawcy}")
 
     # --- wczytanie + duplikaty + kolumny ---
-    df = pd.read_excel(input_file)  # Excel ma już liczby jako float – bez ręcznego 'decimal'
+    df = pd.read_excel(input_file)
     df = handle_duplicates(df, action=duplicates_action)
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -792,7 +792,7 @@ def przetworz_plik_xlsx(
     if brak:
         raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
 
-    # --- WALIDACJA (tworzy __data_str; NIE wycina ujemnych) ---
+    # WALIDACJA KOLUMN
     df, error_log = validate_df(
         df,
         date_col="Data wpływu",
@@ -936,8 +936,8 @@ def przetworz_plik_xlsx(
             nip_clean = str(row["nip_clean"] or "")
             valid = len(nip_clean) == 10 and nip_clean.isdigit()
             kontrahent_name = row["kontrahent"]
-            kw_brutto_gr = int(row["suma_brutto"])
-            kw_vat_gr = int(row["suma_vat"])
+            kw_brutto_gr = int(row["suma_brutto_gr"])
+            kw_vat_gr = int(row["suma_vat_gr"])
             cnt_docs = int(row["cnt_docs"])
 
             if valid:
@@ -980,17 +980,29 @@ def przetworz_plik_xlsx(
             )
             lines.append(line)
 
+            # zapis raportu do pliku kwota Vat w groszach, kwota brutto w groszach, ilosć dokumentów, ne dokumentu
             base_dir = os.path.join("raporty", sanitize_nazwa_folderu(row["kontrahent"]))
             date_dir = os.path.join(base_dir, row["data_wplywu_ddmmyy"])
             os.makedirs(date_dir, exist_ok=True)
 
-            # nazwa pliku = informacja_klient_bank.csv
-            safe_filename = re.sub(r"[^0-9A-Za-z_.-]+", "_", informacja) + ".csv"
-            csv_path = os.path.join(date_dir, safe_filename)
 
-            # zapisuj dane rekordu do CSV
+            doc_no = df_day.loc[
+                (df_day["__grp_key"] == row["__grp_key"]) &
+                (df_day["__data_str"] == row["__data_str"]),
+                "Numer dokumentu"
+            ].astype(str).iloc[0]
+
+            zawartosc = f"{kw_vat_gr} {kw_brutto_gr} {cnt_docs} {doc_no}"
+
+            # Nazwa pliku na podstawie informacji klient-bank
+            filename = re.sub(r"[^0-9A-Za-z_.-]+", "_", informacja) + ".csv"
+
+            # Ścieżka do pliku
+            csv_path = os.path.join(date_dir, filename)
+
+            # Zapisuj dane rekordu do pliku
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
-                f.write(line + "\n")  # pojedynczy rekord
+                f.write(zawartosc + "\n")  # pojedynczy rekord
 
     # zapis raportów z faktur do plików
     if not output_path:
