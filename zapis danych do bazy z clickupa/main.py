@@ -66,7 +66,7 @@ install_short_excepthook()
 pd.set_option('future.no_silent_downcasting', True)
 
 # --- KONFIG ---
-EXCEL_PATH = os.getenv("EXCEL_PATH", "clickup_tasks_clean3.xlsx")
+EXCEL_PATH = os.getenv("EXCEL_PATH", "clickup_tasks_clean.xlsx")
 
 DB_URL = os.getenv("DB_URL")
 LOCAL_TZ = ZoneInfo("Europe/Warsaw")

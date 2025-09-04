@@ -1,242 +1,109 @@
-2025-09-04 12:48:29,267 [INFO] loader:326 - Start wczytywania pliku: clickup_tasks_clean3.xlsx
-2025-09-04 12:48:29,778 [INFO] loader:331 - Wczytano arkusz: 1441 wierszy, 44 kolumn
-2025-09-04 12:48:29,818 [DEBUG] loader:333 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation_status', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
-2025-09-04 12:48:30,099 [INFO] loader:380 - Znormalizowano: 1441 wierszy, 28 kolumn
-2025-09-04 12:48:30,230 [INFO] loader:271 - DIAG: brak oczywistych problemów typów w DF.
-2025-09-04 12:48:31,143 [INFO] loader:548 - Wiersze z ustawionym relation_status: 1361
-2025-09-04 12:48:31,145 [INFO] loader:556 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q65wk', 'status': 'merchant', 'relation_status': 13}]
-2025-09-04 12:48:31,147 [INFO] loader:559 - KONIEC: 1.88 s (wierszy wejściowych: 1441)
-2025-09-04 12:48:31,154 [ERROR] loader:47 - Unhandled exception
+2025-09-04 14:56:17,454 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-04 14:56:18,184 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-04 14:56:18,252 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'Status', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-04 14:56:18,262 [ERROR] loader:56 - Unhandled exception
 Traceback (most recent call last):
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
-    self.dialect.do_execute(
-    ~~~~~~~~~~~~~~~~~~~~~~~^
-        cursor, str_statement, effective_parameters, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
-    cursor.execute(statement, parameters)
-    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-psycopg2.errors.UniqueViolation: duplicate key value violates unique constraint "ux_merchanci_nip_notnull"
-DETAIL:  Key (nip)=(5213913595) already exists.
-
-
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "C:\Users\DELL\Desktop\skrypty\docker_baza\app\main.py", line 610, in <module>
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 620, in <module>
     wczytaj_plik()
     ~~~~~~~~~~~~^^
-  File "C:\Users\DELL\Desktop\skrypty\docker_baza\app\main.py", line 606, in wczytaj_plik
-    con.execute(sql)
-    ~~~~~~~~~~~^^^^^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
-    return meth(
-        self,
-        distilled_parameters,
-        execution_options or NO_OPTIONS,
-    )
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\sql\elements.py", line 526, in _execute_on_connection
-    return connection._execute_clauseelement(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        self, distilled_params, execution_options
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
-    ret = self._execute_context(
-        dialect,
-    ...<8 lines>...
-        cache_hit=cache_hit,
-    )
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
-    return self._exec_single_context(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~^
-        dialect, context, statement, parameters
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 350, in wczytaj_plik
+    df_norm["status"] = df["Status"].apply(lambda v: norm_text(v,55))
+    ~~~~~~~^^^^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 4316, in __setitem__
+    self._set_item(key, value)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 4529, in _set_item
+    value, refs = self._sanitize_column(value)
+                  ~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 5270, in _sanitize_column
+    return _reindex_for_setitem(value, self.index)
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 12699, in _reindex_for_setitem
+    raise err
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\frame.py", line 12694, in _reindex_for_setitem
+    reindexed_value = value.reindex(index)._values
+                      ~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\series.py", line 5164, in reindex
+    return super().reindex(
+           ~~~~~~~~~~~~~~~^
+        index=index,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        tolerance=tolerance,
+        ^^^^^^^^^^^^^^^^^^^^
     )
     ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
-    self._handle_dbapi_exception(
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        e, str_statement, effective_parameters, cursor, context
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\generic.py", line 5629, in reindex
+    return self._reindex_axes(
+           ~~~~~~~~~~~~~~~~~~^
+        axes, level, limit, tolerance, method, fill_value, copy
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ).__finalize__(self, method="reindex")
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\generic.py", line 5652, in _reindex_axes
+    new_index, indexer = ax.reindex(
+                         ~~~~~~~~~~^
+        labels, level=level, limit=limit, tolerance=tolerance, method=method
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     )
     ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 2355, in _handle_dbapi_exception
-    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
-    self.dialect.do_execute(
-    ~~~~~~~~~~~~~~~~~~~~~~~^
-        cursor, str_statement, effective_parameters, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
-    cursor.execute(statement, parameters)
-    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-sqlalchemy.exc.IntegrityError: (psycopg2.errors.UniqueViolation) duplicate key value violates unique constraint "ux_merchanci_nip_notnull"
-DETAIL:  Key (nip)=(5213913595) already exists.
-
-[SQL: 
-WITH ranked AS (
-  SELECT
-    s.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY s.nip
-      ORDER BY
-        s.regulations_acceptance_date DESC NULLS LAST,
-        s.regulations_email_date_sent DESC NULLS LAST,
-        s.data_utworzenia DESC NULLS LAST,
-        s.id DESC
-    ) AS rn
-  FROM merchanci_staging s
-  WHERE s.nip IS NOT NULL
-)
-INSERT INTO merchanci AS m (
-  id, nazwa, status, opis, data_utworzenia, przypisani, category,
-  regulations_acceptance, merchant_group, base_account_type, merchant_mail,
-  nip, merchant_id, merchant_adres, merchant_mail_fv, produkty_merchant,
-  return_adres, telefon_merchant, website_merchant, status_bar_shortcut,
-  mail_warunki, warunki_akceptacja, main_category, merchant_bl_id,
-  merchant_kam, regulations_email_date_sent, regulations_acceptance_date,
-  relation_status
-)
-SELECT
-  r.id, r.nazwa, r.status, r.opis, r.data_utworzenia, r.przypisani, r.category,
-  r.regulations_acceptance, r.merchant_group, r.base_account_type, r.merchant_mail,
-  r.nip, r.merchant_id, r.merchant_adres, r.merchant_mail_fv, r.produkty_merchant,
-  r.return_adres, r.telefon_merchant, r.website_merchant, r.status_bar_shortcut,
-  r.mail_warunki, r.warunki_akceptacja, r.main_category, r.merchant_bl_id,
-  r.merchant_kam, r.regulations_email_date_sent, r.regulations_acceptance_date,
-  r.relation_status
-FROM ranked r
-WHERE r.rn = 1
-ON CONFLICT (nip,id) DO NOTHING ;
-]
-(Background on this error at: https://sqlalche.me/e/20/gkpj)
-2025-09-04 13:06:29,718 [INFO] loader:326 - Start wczytywania pliku: clickup_tasks_clean3.xlsx
-2025-09-04 13:06:30,251 [INFO] loader:331 - Wczytano arkusz: 1441 wierszy, 44 kolumn
-2025-09-04 13:06:30,289 [DEBUG] loader:333 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation_status', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
-2025-09-04 13:06:30,578 [INFO] loader:380 - Znormalizowano: 1441 wierszy, 28 kolumn
-2025-09-04 13:06:30,701 [INFO] loader:271 - DIAG: brak oczywistych problemów typów w DF.
-2025-09-04 13:06:31,610 [INFO] loader:548 - Wiersze z ustawionym relation_status: 1361
-2025-09-04 13:06:31,612 [INFO] loader:556 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q65wk', 'status': 'merchant', 'relation_status': 13}]
-2025-09-04 13:06:31,613 [INFO] loader:559 - KONIEC: 1.89 s (wierszy wejściowych: 1441)
-2025-09-04 13:06:31,624 [ERROR] loader:47 - Unhandled exception
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\indexes\base.py", line 4436, in reindex
+    raise ValueError("cannot reindex on an axis with duplicate labels")
+ValueError: cannot reindex on an axis with duplicate labels
+2025-09-04 14:57:01,796 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-04 14:57:02,352 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-04 14:57:02,392 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-04 14:57:02,699 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-04 14:57:02,750 [ERROR] loader:56 - Unhandled exception
 Traceback (most recent call last):
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
-    self.dialect.do_execute(
-    ~~~~~~~~~~~~~~~~~~~~~~~^
-        cursor, str_statement, effective_parameters, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
-    cursor.execute(statement, parameters)
-    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
-
-
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "C:\Users\DELL\Desktop\skrypty\docker_baza\app\main.py", line 610, in <module>
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 620, in <module>
     wczytaj_plik()
     ~~~~~~~~~~~~^^
-  File "C:\Users\DELL\Desktop\skrypty\docker_baza\app\main.py", line 606, in wczytaj_plik
-    con.execute(sql)
-    ~~~~~~~~~~~^^^^^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
-    return meth(
-        self,
-        distilled_parameters,
-        execution_options or NO_OPTIONS,
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 460, in wczytaj_plik
+    engine = create_engine(DB_URL, future=True, echo=False)
+  File "<string>", line 2, in create_engine
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\util\deprecations.py", line 281, in warned
+    return fn(*args, **kwargs)  # type: ignore[no-any-return]
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\create.py", line 564, in create_engine
+    u = _url.make_url(url)
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\url.py", line 860, in make_url
+    raise exc.ArgumentError(
+        f"Expected string or URL object, got {name_or_url!r}"
     )
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\sql\elements.py", line 526, in _execute_on_connection
-    return connection._execute_clauseelement(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        self, distilled_params, execution_options
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlalchemy.exc.ArgumentError: Expected string or URL object, got None
+2025-09-04 15:00:29,109 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-04 15:00:29,623 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-04 15:00:29,664 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-04 15:00:29,958 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-04 15:00:30,008 [ERROR] loader:56 - Unhandled exception
+Traceback (most recent call last):
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 620, in <module>
+    wczytaj_plik()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 460, in wczytaj_plik
+    engine = create_engine(DB_URL, future=True, echo=False)
+  File "<string>", line 2, in create_engine
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\util\deprecations.py", line 281, in warned
+    return fn(*args, **kwargs)  # type: ignore[no-any-return]
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\create.py", line 564, in create_engine
+    u = _url.make_url(url)
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\url.py", line 860, in make_url
+    raise exc.ArgumentError(
+        f"Expected string or URL object, got {name_or_url!r}"
     )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
-    ret = self._execute_context(
-        dialect,
-    ...<8 lines>...
-        cache_hit=cache_hit,
-    )
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
-    return self._exec_single_context(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~^
-        dialect, context, statement, parameters
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
-    self._handle_dbapi_exception(
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        e, str_statement, effective_parameters, cursor, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 2355, in _handle_dbapi_exception
-    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
-    self.dialect.do_execute(
-    ~~~~~~~~~~~~~~~~~~~~~~~^
-        cursor, str_statement, effective_parameters, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
-    cursor.execute(statement, parameters)
-    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-sqlalchemy.exc.ProgrammingError: (psycopg2.errors.InvalidColumnReference) there is no unique or exclusion constraint matching the ON CONFLICT specification
-
-[SQL: 
-WITH ranked AS (
-  SELECT
-    s.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY s.nip
-      ORDER BY
-        s.regulations_acceptance_date DESC NULLS LAST,
-        s.regulations_email_date_sent DESC NULLS LAST,
-        s.data_utworzenia DESC NULLS LAST,
-        s.id DESC
-    ) AS rn
-  FROM merchanci_staging s
-  WHERE s.nip IS NOT NULL
-)
-INSERT INTO merchanci AS m (
-  id, nazwa, status, opis, data_utworzenia, przypisani, category,
-  regulations_acceptance, merchant_group, base_account_type, merchant_mail,
-  nip, merchant_id, merchant_adres, merchant_mail_fv, produkty_merchant,
-  return_adres, telefon_merchant, website_merchant, status_bar_shortcut,
-  mail_warunki, warunki_akceptacja, main_category, merchant_bl_id,
-  merchant_kam, regulations_email_date_sent, regulations_acceptance_date,
-  relation_status
-)
-SELECT
-  r.id, r.nazwa, r.status, r.opis, r.data_utworzenia, r.przypisani, r.category,
-  r.regulations_acceptance, r.merchant_group, r.base_account_type, r.merchant_mail,
-  r.nip, r.merchant_id, r.merchant_adres, r.merchant_mail_fv, r.produkty_merchant,
-  r.return_adres, r.telefon_merchant, r.website_merchant, r.status_bar_shortcut,
-  r.mail_warunki, r.warunki_akceptacja, r.main_category, r.merchant_bl_id,
-  r.merchant_kam, r.regulations_email_date_sent, r.regulations_acceptance_date,
-  r.relation_status
-FROM ranked r
-WHERE r.rn = 1
-ON CONFLICT (id,nip) DO NOTHING ;
-]
-(Background on this error at: https://sqlalche.me/e/20/f405)
-2025-09-04 13:08:08,413 [INFO] loader:326 - Start wczytywania pliku: clickup_tasks_clean3.xlsx
-2025-09-04 13:08:08,914 [INFO] loader:331 - Wczytano arkusz: 1441 wierszy, 44 kolumn
-2025-09-04 13:08:08,958 [DEBUG] loader:333 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation_status', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
-2025-09-04 13:08:09,229 [INFO] loader:380 - Znormalizowano: 1441 wierszy, 28 kolumn
-2025-09-04 13:08:09,350 [INFO] loader:271 - DIAG: brak oczywistych problemów typów w DF.
-2025-09-04 13:08:10,251 [INFO] loader:548 - Wiersze z ustawionym relation_status: 1361
-2025-09-04 13:08:10,254 [INFO] loader:556 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q65wk', 'status': 'merchant', 'relation_status': 13}]
-2025-09-04 13:08:10,255 [INFO] loader:559 - KONIEC: 1.84 s (wierszy wejściowych: 1441)
+sqlalchemy.exc.ArgumentError: Expected string or URL object, got None
+2025-09-04 15:02:21,918 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-04 15:02:22,458 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-04 15:02:22,501 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-04 15:02:22,888 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-04 15:02:23,117 [INFO] loader:281 - DIAG: brak oczywistych problemów typów w DF.
+2025-09-04 15:02:24,215 [INFO] loader:558 - Wiersze z ustawionym relation_status: 1361
+2025-09-04 15:02:24,218 [INFO] loader:566 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q65wk', 'status': 'merchant', 'relation_status': 13}]
+2025-09-04 15:02:24,218 [INFO] loader:569 - KONIEC: 2.30 s (wierszy wejściowych: 1465)
+2025-09-04 15:39:54,327 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-04 15:39:54,851 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-04 15:39:54,892 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-04 15:39:55,189 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-04 15:39:55,329 [INFO] loader:281 - DIAG: brak oczywistych problemów typów w DF.
+2025-09-04 15:39:56,429 [INFO] loader:558 - Wiersze z ustawionym relation_status: 1361
+2025-09-04 15:39:56,432 [INFO] loader:566 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5wvt', 'status': 'premerchant', 'relation_status': None}]
+2025-09-04 15:39:56,433 [INFO] loader:569 - KONIEC: 2.11 s (wierszy wejściowych: 1465)
