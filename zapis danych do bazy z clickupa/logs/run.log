@@ -107,3 +107,300 @@ sqlalchemy.exc.ArgumentError: Expected string or URL object, got None
 2025-09-04 15:39:56,429 [INFO] loader:558 - Wiersze z ustawionym relation_status: 1361
 2025-09-04 15:39:56,432 [INFO] loader:566 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5wvt', 'status': 'premerchant', 'relation_status': None}]
 2025-09-04 15:39:56,433 [INFO] loader:569 - KONIEC: 2.11 s (wierszy wejściowych: 1465)
+2025-09-05 11:41:07,780 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-05 11:41:08,814 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-05 11:41:08,894 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-05 11:41:09,356 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-05 11:56:22,743 [INFO] loader:281 - DIAG: brak oczywistych problemów typów w DF.
+2025-09-05 11:56:24,892 [INFO] loader:558 - Wiersze z ustawionym relation_status: 614
+2025-09-05 11:56:24,897 [INFO] loader:566 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q65wk', 'status': 'merchant', 'relation_status': 13}]
+2025-09-05 11:56:24,898 [INFO] loader:569 - KONIEC: 917.12 s (wierszy wejściowych: 1465)
+2025-09-05 11:56:24,959 [ERROR] loader:56 - Unhandled exception
+Traceback (most recent call last):
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+psycopg2.errors.UniqueViolation: duplicate key value violates unique constraint "uq_merchant_id"
+DETAIL:  Key (id)=(86c3gubby) already exists.
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 620, in <module>
+    wczytaj_plik()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 616, in wczytaj_plik
+    con.execute(sql)
+    ~~~~~~~~~~~^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
+    return meth(
+        self,
+        distilled_parameters,
+        execution_options or NO_OPTIONS,
+    )
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\sql\elements.py", line 526, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self, distilled_params, execution_options
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+        dialect,
+    ...<8 lines>...
+        cache_hit=cache_hit,
+    )
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        dialect, context, statement, parameters
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        e, str_statement, effective_parameters, cursor, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 2355, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+sqlalchemy.exc.IntegrityError: (psycopg2.errors.UniqueViolation) duplicate key value violates unique constraint "uq_merchant_id"
+DETAIL:  Key (id)=(86c3gubby) already exists.
+
+[SQL: 
+WITH ranked AS (
+  SELECT
+    s.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY s.nip
+      ORDER BY
+        s.regulations_acceptance_date DESC NULLS LAST,
+        s.regulations_email_date_sent DESC NULLS LAST,
+        s.data_utworzenia DESC NULLS LAST,
+        s.id DESC
+    ) AS rn
+  FROM merchanci_staging s
+  WHERE s.nip IS NOT NULL
+)
+INSERT INTO merchanci AS m (
+  id, nazwa, status, opis, data_utworzenia, przypisani, category,
+  regulations_acceptance, merchant_group, base_account_type, merchant_mail,
+  nip, merchant_id, merchant_adres, merchant_mail_fv, produkty_merchant,
+  return_adres, telefon_merchant, website_merchant, status_bar_shortcut,
+  mail_warunki, warunki_akceptacja, main_category, merchant_bl_id,
+  merchant_kam, regulations_email_date_sent, regulations_acceptance_date,
+  relation_status
+)
+SELECT
+  r.id, r.nazwa, r.status, r.opis, r.data_utworzenia, r.przypisani, r.category,
+  r.regulations_acceptance, r.merchant_group, r.base_account_type, r.merchant_mail,
+  r.nip, r.merchant_id, r.merchant_adres, r.merchant_mail_fv, r.produkty_merchant,
+  r.return_adres, r.telefon_merchant, r.website_merchant, r.status_bar_shortcut,
+  r.mail_warunki, r.warunki_akceptacja, r.main_category, r.merchant_bl_id,
+  r.merchant_kam, r.regulations_email_date_sent, r.regulations_acceptance_date,
+  r.relation_status
+FROM ranked r
+WHERE r.rn = 1
+ON CONFLICT (nip) DO NOTHING ;
+]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
+2025-09-05 12:27:19,511 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-05 12:27:20,108 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-05 12:27:20,153 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-05 12:27:20,459 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-05 12:34:42,984 [ERROR] loader:56 - Unhandled exception
+Traceback (most recent call last):
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 620, in <module>
+    wczytaj_plik()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 464, in wczytaj_plik
+    con.execute(text("TRUNCATE TABLE merchanci_staging;"))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
+    return meth(
+        self,
+        distilled_parameters,
+        execution_options or NO_OPTIONS,
+    )
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\sql\elements.py", line 526, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self, distilled_params, execution_options
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+        dialect,
+    ...<8 lines>...
+        cache_hit=cache_hit,
+    )
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        dialect, context, statement, parameters
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        e, str_statement, effective_parameters, cursor, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 2358, in _handle_dbapi_exception
+    raise exc_info[1].with_traceback(exc_info[2])
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\encodings\utf_8.py", line 15, in decode
+    def decode(input, errors='strict'):
+    
+KeyboardInterrupt
+2025-09-05 12:46:19,092 [INFO] loader:336 - Start wczytywania pliku: clickup_tasks_clean.xlsx
+2025-09-05 12:46:19,595 [INFO] loader:341 - Wczytano arkusz: 1465 wierszy, 44 kolumn
+2025-09-05 12:46:19,638 [DEBUG] loader:343 - Kolumny po czyszczeniu: ['ID', 'Nazwa', 'Status', 'Opis', 'Data utworzenia', 'Data aktualizacji', 'Przypisani', 'Category', 'Regulations accept', 'Merchant Group', 'Base. Account Type', 'Merchant mail', 'NIP', 'Merchant ID', 'Merchant Adres', 'Merchant Mail FV', 'Produkty Merchanta', 'Return Adres', 'Telefon', 'Website', 'Next Meeting Date:', 'Held first meeting', 'StatusBar Shortcut', 'Mail warunki', 'Warunki', 'Main Category', 'Merchant BL ID', 'Merchant KAM', 'Regulations email date sent', 'Merchant Information Form', 'SM Bestsellers upload', 'Merchant KAM (link)', 'Regulations accept date', 'Regulations Accept Relation', 'AVG Sent -> Accept', 'Listing ready Date', 'AVG Sent -> Listing', 'AVG Accept -> Listing', 'Akceptacja Regulaminu', 'SYNC WITH SM', 'relation statu', 'Price Check', 'Podmiana nazwy', 'Price Check fail Mail']
+2025-09-05 12:46:19,929 [INFO] loader:390 - Znormalizowano: 1465 wierszy, 28 kolumn
+2025-09-05 12:46:20,047 [INFO] loader:281 - DIAG: brak oczywistych problemów typów w DF.
+2025-09-05 12:46:21,047 [INFO] loader:558 - Wiersze z ustawionym relation_status: 614
+2025-09-05 12:46:21,049 [INFO] loader:566 - Próbka po UPSERCIE: [{'id': '86c1q4ztg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q529h', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5b48', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q5urg', 'status': 'merchant', 'relation_status': 13}, {'id': '86c1q65wk', 'status': 'merchant', 'relation_status': 13}]
+2025-09-05 12:46:21,050 [INFO] loader:569 - KONIEC: 1.96 s (wierszy wejściowych: 1465)
+2025-09-05 12:46:21,075 [ERROR] loader:56 - Unhandled exception
+Traceback (most recent call last):
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+psycopg2.errors.UniqueViolation: duplicate key value violates unique constraint "uq_merchant_id"
+DETAIL:  Key (id)=(86c3gubby) already exists.
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 620, in <module>
+    wczytaj_plik()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\zapis danych do bazy z clickupa\main.py", line 616, in wczytaj_plik
+    con.execute(sql)
+    ~~~~~~~~~~~^^^^^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
+    return meth(
+        self,
+        distilled_parameters,
+        execution_options or NO_OPTIONS,
+    )
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\sql\elements.py", line 526, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self, distilled_params, execution_options
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+        dialect,
+    ...<8 lines>...
+        cache_hit=cache_hit,
+    )
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        dialect, context, statement, parameters
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        e, str_statement, effective_parameters, cursor, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 2355, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\site-packages\sqlalchemy\engine\default.py", line 951, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+sqlalchemy.exc.IntegrityError: (psycopg2.errors.UniqueViolation) duplicate key value violates unique constraint "uq_merchant_id"
+DETAIL:  Key (id)=(86c3gubby) already exists.
+
+[SQL: 
+WITH ranked AS (
+  SELECT
+    s.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY s.nip
+      ORDER BY
+        s.regulations_acceptance_date DESC NULLS LAST,
+        s.regulations_email_date_sent DESC NULLS LAST,
+        s.data_utworzenia DESC NULLS LAST,
+        s.id DESC
+    ) AS rn
+  FROM merchanci_staging s
+  WHERE s.nip IS NOT NULL
+)
+INSERT INTO merchanci AS m (
+  id, nazwa, status, opis, data_utworzenia, przypisani, category,
+  regulations_acceptance, merchant_group, base_account_type, merchant_mail,
+  nip, merchant_id, merchant_adres, merchant_mail_fv, produkty_merchant,
+  return_adres, telefon_merchant, website_merchant, status_bar_shortcut,
+  mail_warunki, warunki_akceptacja, main_category, merchant_bl_id,
+  merchant_kam, regulations_email_date_sent, regulations_acceptance_date,
+  relation_status
+)
+SELECT
+  r.id, r.nazwa, r.status, r.opis, r.data_utworzenia, r.przypisani, r.category,
+  r.regulations_acceptance, r.merchant_group, r.base_account_type, r.merchant_mail,
+  r.nip, r.merchant_id, r.merchant_adres, r.merchant_mail_fv, r.produkty_merchant,
+  r.return_adres, r.telefon_merchant, r.website_merchant, r.status_bar_shortcut,
+  r.mail_warunki, r.warunki_akceptacja, r.main_category, r.merchant_bl_id,
+  r.merchant_kam, r.regulations_email_date_sent, r.regulations_acceptance_date,
+  r.relation_status
+FROM ranked r
+WHERE r.rn = 1
+ON CONFLICT (nip) DO NOTHING ;
+]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
