@@ -9,9 +9,9 @@ from datetime import datetime,timedelta
 
 from numpy.lib.recfunctions import find_duplicates
 
-# PRogram odczytuje dane z pliku xlsx i wysyłą dane do fakturowni
+# Program odczytuje dane z pliku xlsx i wysyłą dane do fakturowni
 # potem pobiera dane z fakturowni (może)
-# wysyła emaile z fakturami
+# wysyła emaile z fakturami do listy kontrahentów z plików
 
 ####
 # Konfiguracja i pomniejsze narzędzia
