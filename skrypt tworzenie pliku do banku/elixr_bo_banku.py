@@ -23,13 +23,13 @@ from collections import defaultdict
 
 
 # TODO
-# Dodać nie branie pod uwagę faktur testowych - Status PREMERCHANT TO BE DONE
+# Dodać nie branie pod uwagę faktur testowych - Status PREMERCHANT  DONE
 # Zmiana nazwy plkiku na kolumne 17 elixir DONE
 # ujemne pozycje nie mogą być uwzględnianie w agregacji faktur DONE
 # zmienić agregację przelewów po nipie i dacie DONE
 # Dodać cachowanie danych do pliku żeby nie palić dziennego limitu
-# zapytań do whitelisty vatowców
-# Dodać podział na dni na pliki
+# zapytań do whitelisty vatowców 1/2 DONE
+# Dodać podział na dni na pliki DONE
 
 #######################
 # INSTRUKCJA OBSLUGI CLI
@@ -482,6 +482,25 @@ def wl_search_bank_account(bank_account_nrb: str, date_iso: str) -> dict:
         return {"ok": False, "subjects": [], "nips": set(), "error": f"{e}"}
 
 
+def clean_invoice_id(s: str) -> str:
+    current_year = datetime.now().year
+    s = re.sub(rf"\b{current_year}\b", "", s)
+
+    # zamienia / na - i czyści spacje wielokrotne
+    s = str(s or "")
+    s = s.replace("/", "-")
+    s = s.replace("\\", "-")
+    s = s.replace("|", "")
+    # usuń godzinę z końca np. "2025-08-02 00:00:00" → "2025-08-02"
+    s = re.sub(r"\s*\d{2}:\d{2}:\d{2}$", "", s)
+
+    # dodatkowo jeśli zostanie sama data z czasem (np. Timestamp), to też skróci
+    s = re.sub(r"(\d{4}-\d{2}-\d{2}).*", r"\1", s)
+
+    # normalizacja spacji
+    s = re.sub(r"\s", " ", s).strip()
+    return s
+
 def bulk_insert_oplacone_faktury(rows: list[tuple]):
     if not rows:
         return
@@ -695,12 +714,13 @@ def build_payment_record(
     nazwa_i_adres_kontrahenta: str,
     nr_rozliczeniowy_banku_kontrahenta: str,
     szczegoly_platnosci: str,
-    klasyfikacja: str,
-    informacja_klient_bank: str,
+    klasyfikacja:str
+    # klasyfikacja: str,
+    # informacja_klient_bank: str,
 ) -> str:
     # Uwaga: BEZ cudzysłowów – czyste wartości rozdzielone przecinkami.
     fields = [
-        "210",
+        "110",
         data_platnosci,
         str(kwota_brutto_gr),
         nr_rozliczeniowy_zleceniodawcy,
@@ -711,11 +731,11 @@ def build_payment_record(
         sanitize_text(nazwa_i_adres_kontrahenta),    # 9
         "0",
         nr_rozliczeniowy_banku_kontrahenta,
-        sanitize_text(szczegoly_platnosci),          # 12  (np. /NIP/…|/IDP/…|/TYT/…)
+        csv_quote(  szczegoly_platnosci),          # 12  (np. /NIP/…|/IDP/…|/TYT/…)
         "",
         "",
         klasyfikacja,
-        trim_to(sanitize_text(informacja_klient_bank), 19),  # 16 (max 19)
+        # trim_to(sanitize_text(informacja_klient_bank), 19),  # 16 (max 19)
     ]
     return ",".join(fields)
 
@@ -792,6 +812,20 @@ def _safe_add30(s_min: str | None, s_max: str | None) -> str:
     base = s_max or s_min
     return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
 
+def gr_to_pln_comma(v_gr: int) -> str:
+    v = int(v_gr)
+    sign = "-" if v < 0 else ""
+    v = abs(v)
+    return f"{sign}{v//100},{v%100:02d}"
+
+# ucina długość do 35 znaków
+def cut_to_35(str):
+    if len(str ) <=35:
+        return str
+    elif len(str) > 35:
+      return str[:35]
+    else:
+        return ""
 # ====================================
 # GŁÓWNA FUNKCJA zapisująco - tworząca
 # ====================================
@@ -801,6 +835,37 @@ ACTIVE_STATUSES = {"Czynny", "ACTIVE", "czynny"}
 
 def _wl_status_ok(s: str | None) -> bool:
     return (s or "").strip() in ACTIVE_STATUSES
+
+def wrap_szczegoly(segments: list[str], max_len: int = 35, max_parts: int = 4) -> str:
+    """
+    Łączy segmenty typu ["/VAT/123", "/IDC/...", "/INV/..."] w string zgodny z ELIXIR:
+    - każdy fragment max 35 znaków
+    - max 4 fragmenty (łącznie 140 znaków)
+    - separator '|' tylko między fragmentami
+    """
+    parts: list[str] = []
+    current = ""
+
+    for seg in segments:
+        # jeśli segment za długi sam w sobie, ucinamy
+        seg = seg[:max_len]
+
+        # sprawdzamy czy mieści się do obecnego fragmentu
+        if len(current) + len(seg) <= max_len:
+            current += seg
+        else:
+            # zamknij obecny i rozpocznij nowy
+            if current:
+                parts.append(current)
+            current = seg
+
+    if current:
+        parts.append(current)
+
+    # max 4 części
+    parts = parts[:max_parts]
+    return "|".join(parts)
+
 
 def przetworz_plik_xlsx(
     input_file: str,
@@ -823,7 +888,7 @@ def przetworz_plik_xlsx(
     nr_rozliczeniowy_zleceniodawcy = conf["bank_code"]  # 8 cyfr
     rachunek_zleceniodawcy = conf["nrb"]                # 26 cyfr
     tryb_realizacji = "0"
-    klasyfikacja = "01"
+    klasyfikacja = "53"
 
     # sanity check nadawcy
     if len(re.sub(r"\D", "", rachunek_zleceniodawcy)) != 26:
@@ -848,7 +913,7 @@ def przetworz_plik_xlsx(
     if brak:
         raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
 
-    # --- walidacja merytoryczna (nie wycina, tylko loguje — on_error='keep') ---
+    # --- walidacja (loguj, nie wycinaj) ---
     df, error_log = validate_df(
         df,
         date_col="Data wpływu",
@@ -860,13 +925,12 @@ def przetworz_plik_xlsx(
     )
     export_error_log(error_log, os.path.join(OUTPUT_DIR, f"errors_{ts}.csv"))
 
-    # --- wycięcie ujemnych kwot (do osobnego raportu) ---
+    # --- ujemne kwoty do raportu i out ---
     mask_negative = (df["Netto"] < 0) | (df["VAT"] < 0) | (df["Brutto"] < 0)
     if mask_negative.any():
         print(f"[WARN] Pomijam {int(mask_negative.sum())} wierszy z ujemnymi kwotami (zapisano raport).")
         df.loc[mask_negative].to_csv(os.path.join(OUTPUT_DIR, f"ujemne_{ts}.csv"), index=False, encoding="utf-8-sig")
     df = df.loc[~mask_negative].copy()
-
     if df.empty:
         with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
             f.write("")
@@ -901,13 +965,14 @@ def przetworz_plik_xlsx(
         axis=1
     )
 
-    # --- agregacja: kontrahent × dzień (data wpływu) ---
+    # --- agregacja: kontrahent/dzień (data wpływu) ---
     df_day = df.loc[df["__data_str"].notna()].copy()
     agg = (
         df_day.groupby(["__grp_key", "__data_str"], as_index=False)
         .agg(
             nip_clean   =("__nip_clean", "first"),
             kontrahent  =("Kontrahent", "first"),
+            first_doc   =("Numer dokumentu", "first"),
             suma_brutto =("Brutto", "sum"),
             suma_vat    =("VAT", "sum"),
             suma_netto  =("Netto", "sum"),
@@ -923,8 +988,8 @@ def przetworz_plik_xlsx(
     # daty do pliku bankowego
     def _safe_ddmmyy(s: str) -> str:
         return datetime.strptime(s, "%Y%m%d").strftime("%d%m%y")
-    agg["data_platnosci"]       = agg["__data_str"].apply(lambda s: _safe_add30(s, s))  # +30 dni
-    agg["data_wplywu_ddmmyy"]   = agg["__data_str"].apply(_safe_ddmmyy)
+    agg["data_platnosci"]     = agg["__data_str"].apply(lambda s: _safe_add30(s, s))  # +30 dni
+    agg["data_wplywu_ddmmyy"] = agg["__data_str"].apply(_safe_ddmmyy)
 
     # twardy check kolumn
     required = {"__data_str", "data_platnosci", "data_wplywu_ddmmyy",
@@ -961,16 +1026,17 @@ def przetworz_plik_xlsx(
                 date_iso = wl_api_iso_date_from_yyyymmdd(r["__data_str"])
                 accounts_to_query.add((nrb, date_iso))
 
-    wl_acc_map: dict[tuple[str, str], set[str]] = {}   # (nrb, date_iso) -> set(NIP)
-    if wl_check:
-        for (nrb, date_iso) in sorted(accounts_to_query):
-            res = wl_search_bank_account(nrb, date_iso)
-            if not res["ok"]:
-                print(f"[WL][ACC][ERR] NRB={nrb} date={date_iso}: {res['error']}")
-                wl_acc_map[(nrb, date_iso)] = set()
-            else:
-                wl_acc_map[(nrb, date_iso)] = res["nips"]
-                print(f"[WL][ACC] NRB={nrb} date={date_iso} -> NIPy={len(res['nips'])}")
+    wl_acc_map: dict[tuple[str, str], set[str]] = {}   # (nrb, date_iso) set(NIP)
+    # odkomentowąc jutro na dzisiaj koniec free testów
+    # if wl_check:
+    #     for (nrb, date_iso) in sorted(accounts_to_query):
+    #         res = wl_search_bank_account(nrb, date_iso)
+    #         if not res["ok"]:
+    #             print(f"[WL][ACC][ERR] NRB={nrb} date={date_iso}: {res['error']}")
+    #             wl_acc_map[(nrb, date_iso)] = set()
+    #         else:
+    #             wl_acc_map[(nrb, date_iso)] = res["nips"]
+    #             print(f"[WL][ACC] NRB={nrb} date={date_iso} -> NIPy={len(res['nips'])}")
 
     # licznik/log WL
     wl_cnt_assigned = wl_cnt_unassigned = wl_cnt_skipped = 0
@@ -991,8 +1057,6 @@ def przetworz_plik_xlsx(
                 # kwoty już po agregacji
                 kw_brutto_gr = int(row["suma_brutto_gr"])
                 kw_vat_gr    = int(row["suma_vat_gr"])
-                cnt_docs     = int(row["cnt_docs"])
-
                 # adres + konto kontrahenta
                 if valid_nip:
                     adres_kontr = adres_cache.get(nip_clean) or get_or_fetch_adres(nip_clean, scraper)
@@ -1005,7 +1069,7 @@ def przetworz_plik_xlsx(
                 adres_kontr = clean_address(adres_kontr)
                 nr_rozliczeniowy_banku_kontrahenta = bank_code_from_nrb(rachunek_kontrahenta)
 
-                # WL: check przypisania konta do NIP (tylko gdy realny NRB)
+                # WL: przypisanie konta do NIP (tylko gdy realny NRB)
                 if wl_check and valid_nip and rachunek_kontrahenta != "0"*26:
                     date_iso = wl_api_iso_date_from_yyyymmdd(row["__data_str"])
                     assigned_set = wl_acc_map.get((rachunek_kontrahenta, date_iso), set())
@@ -1021,19 +1085,20 @@ def przetworz_plik_xlsx(
                 # pole 16 (max 19) – NIP + ddmmyy z daty wpływu
                 nip_for_ref = nip_clean if valid_nip else "NA"
                 data_wplywu_ddmmyy = row["data_wplywu_ddmmyy"]
-                informacja = trim_to(f"{nip_for_ref}{data_wplywu_ddmmyy}", 19)
+                informacja = (f"{nip_for_ref}{data_wplywu_ddmmyy}")
 
-                # pole 12 – szczegóły (IDP/TYT dla spójności)
-                idp   = f"{nip_clean}{data_wplywu_ddmmyy}" if valid_nip else f"NOID{data_wplywu_ddmmyy}"
-                tytul = f"Faktury {data_wplywu_ddmmyy}"
+                inv = sanitize_text(str(row.get("first_doc", "")))
+
+                vat_txt = gr_to_pln_comma(kw_vat_gr)
+                # szczegoly.strip('"')
                 szczegoly = (
-                    f"/NIP/{nip_clean or 'NA'}"
-                    f"|/CNT/{cnt_docs}"
-                    f"|/VAT/{kw_vat_gr}"
-                    f"|/AMT/{kw_brutto_gr}"
-                    f"|/IDP/{idp}"
-                    f"|/TYT/{tytul}"
+                    f"/VAT/{vat_txt}|"
+                    f"/IDC/{nip_clean or 'NA'}|"
+                    f"/INV/FV{data_wplywu_ddmmyy}|"
+                    f"/IDP/{informacja}"
                 )
+
+                # szczegoly_wrapped = wrap_szczegoly(szczegoly)
 
                 line = build_payment_record(
                     data_platnosci=row["data_platnosci"],  # już policzone w agg (D+30)
@@ -1046,15 +1111,14 @@ def przetworz_plik_xlsx(
                     nazwa_i_adres_kontrahenta=adres_kontr,
                     nr_rozliczeniowy_banku_kontrahenta=nr_rozliczeniowy_banku_kontrahenta,
                     szczegoly_platnosci=szczegoly,
-                    klasyfikacja=klasyfikacja,
-                    informacja_klient_bank=informacja,
+                    klasyfikacja=klasyfikacja
                 )
 
                 day_key = row["__data_str"]  # YYYYMMDD
                 lines_by_day[day_key].append(line)
     except WebDriverException as e:
         print(f"[SCRAPER] Błąd Selenium: {e}. Kontynuuję bez scrapera (adresy mogą być surowe).")
-        # awaryjnie bez adresów z REGON:
+        # awaryjnie bez adresów z REGON – generuj analogicznie
         for _, row in agg.iterrows():
             nip_clean = str(row["nip_clean"] or "")
             valid_nip = nip_clean.isdigit() and len(nip_clean) == 10
@@ -1062,7 +1126,6 @@ def przetworz_plik_xlsx(
 
             kw_brutto_gr = int(row["suma_brutto_gr"])
             kw_vat_gr    = int(row["suma_vat_gr"])
-            cnt_docs     = int(row["cnt_docs"])
 
             if valid_nip:
                 adres_kontr = kontrahent_name  # fallback
@@ -1077,17 +1140,17 @@ def przetworz_plik_xlsx(
             nip_for_ref = nip_clean if valid_nip else "NA"
             data_wplywu_ddmmyy = row["data_wplywu_ddmmyy"]
             informacja = trim_to(f"{nip_for_ref}{data_wplywu_ddmmyy}", 19)
+            inv = sanitize_text(str(row.get("first_doc", "")))
+            vat_txt = gr_to_pln_comma(kw_vat_gr)
 
-            idp   = f"{nip_clean}{data_wplywu_ddmmyy}" if valid_nip else f"NOID{data_wplywu_ddmmyy}"
-            tytul = f"Faktury {data_wplywu_ddmmyy}"
             szczegoly = (
-                f"/NIP/{nip_clean or 'NA'}"
-                f"|/CNT/{cnt_docs}"
-                f"|/VAT/{kw_vat_gr}"
-                f"|/AMT/{kw_brutto_gr}"
-                f"|/IDP/{idp}"
-                f"|/TYT/{tytul}"
+                f"/VAT/{vat_txt}|"
+                f"/IDC/{nip_clean or 'NA'}|"
+                f"/INV/FV{data_wplywu_ddmmyy}|"
+                f"/IDP/{informacja}"
             )
+
+            # szczegoly_wrapped = wrap_szczegoly(szczegoly)
 
             line = build_payment_record(
                 data_platnosci=row["data_platnosci"],
@@ -1100,8 +1163,7 @@ def przetworz_plik_xlsx(
                 nazwa_i_adres_kontrahenta=adres_kontr,
                 nr_rozliczeniowy_banku_kontrahenta=nr_rozliczeniowy_banku_kontrahenta,
                 szczegoly_platnosci=szczegoly,
-                klasyfikacja=klasyfikacja,
-                informacja_klient_bank=informacja,
+                klasyfikacja=klasyfikacja
             )
 
             day_key = row["__data_str"]
@@ -1172,5 +1234,5 @@ if __name__ == "__main__":
         headless=args.headless,
         merged_csv=args.merged_csv,
         per_group_dir=args.per_group_dir,
-        wl_check=args.wl_check,
+        # wl_check=args.wl_check,
     )

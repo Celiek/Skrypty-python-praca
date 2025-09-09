@@ -2,10 +2,12 @@ import pandas as pd
 from argparse import ArgumentParser, BooleanOptionalAction
 from typing import Optional
 from dotenv import load_dotenv
-from smtplib import SMTP
+import smtplib,ssl
 import os
 import re
 from datetime import datetime,timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from numpy.lib.recfunctions import find_duplicates
 
@@ -17,6 +19,7 @@ from numpy.lib.recfunctions import find_duplicates
 # Konfiguracja i pomniejsze narzędzia
 ####
 
+API_KEY = "APm09aG5zbhkjs24uA-E"
 
 COMPANIES = {
     "shumee": {
@@ -39,9 +42,6 @@ COMPANIES = {
 
 def get_email_db(email:str):
     return 0
-
-def nip_digits(nip: str) -> str:
-    return re.sub(r"\D", "", str(nip or ""))
 
 def serializacja_dat(x) -> str:
     """YYYYMMDD; obsługuje datetime/Timestamp, serial Excela oraz popularne stringi."""
@@ -67,14 +67,6 @@ def serializacja_dat(x) -> str:
 
 def clean_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
-
-def valid_nip(nip: str) -> bool:
-    nip = clean_digits(nip)
-    if len(nip) != 10 or not nip.isdigit():
-        return False
-    w = [6, 5, 7, 2, 3, 4, 5, 6, 7]
-    checksum = sum(int(nip[i]) * w[i] for i in range(9)) % 11
-    return checksum == int(nip[9])
 
 def normalize_nrb(account: str) -> str:
     """Zwraca 26 cyfr NRB (lub pusty string, gdy format niepoprawny)."""
