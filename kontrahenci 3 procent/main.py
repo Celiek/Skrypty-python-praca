@@ -51,6 +51,14 @@ def nip_digits(nip: str) -> str:
     if len(cleaned) != 10:
         print(f"[WARN] NIP ma nieprawidłową długość: {nip} → {cleaned}")
     return cleaned
+def handle_duplicates(df: pd.DataFrame,action: str = "error") -> pd.DataFrame:
+    required = {"Data wystawienia","Netto","VAT","Brutto","Kontrahent","Numer dokumentu","NIP"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Brak kolumn: {'",'.join(sorted(missing))}")
+
+    d = df.copy()
+    mdup = d.duplicated(subset=["Numer dokumentu", "Netto", "Vat", "Brutto"], keep="first")
 
 
 # Główna część logiki
@@ -109,6 +117,7 @@ def czytaj_plik(
     # odczyszczanie danych z plików
     df["NIP"] = df["NIP"].apply(nip_digits)
     suma_stawki = df.groupby("NIP")[["Netto","VAT","Brutto"]].sum().reset_index()
+    df =
 
     print(suma_stawki)
 
