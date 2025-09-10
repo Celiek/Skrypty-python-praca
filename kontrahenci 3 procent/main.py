@@ -9,7 +9,6 @@ from datetime import datetime,timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from numpy.lib.recfunctions import find_duplicates
 
 # Program odczytuje dane z pliku xlsx i wysyłą dane do fakturowni
 # potem pobiera dane z fakturowni (może)
@@ -19,7 +18,11 @@ from numpy.lib.recfunctions import find_duplicates
 # Konfiguracja i pomniejsze narzędzia
 ####
 
-API_KEY = "APm09aG5zbhkjs24uA-E"
+API_KEY = "K88WQTGPSBiuGdLgwHrc"
+
+
+OUTPUT_DIR = os.getenv("OUTPUT_DIR",".")
+os.makedirs(OUTPUT_DIR,exist_ok=True)
 
 COMPANIES = {
     "shumee": {
@@ -43,92 +46,85 @@ COMPANIES = {
 def get_email_db(email:str):
     return 0
 
-def serializacja_dat(x) -> str:
-    """YYYYMMDD; obsługuje datetime/Timestamp, serial Excela oraz popularne stringi."""
-    if isinstance(x, (datetime, pd.Timestamp)):
-        return pd.to_datetime(x).strftime("%Y%m%d")
+def nip_digits(nip: str) -> str:
+    cleaned = re.sub(r"\D", "", str(nip or ""))
+    if len(cleaned) != 10:
+        print(f"[WARN] NIP ma nieprawidłową długość: {nip} → {cleaned}")
+    return cleaned
 
-    if isinstance(x, (int, float)) and not pd.isna(x):
-        # Excel 1900-date system (z "leap bug") → origin=1899-12-30
-        try:
-            return pd.to_datetime(x, unit="D", origin="1899-12-30").strftime("%Y%m%d")
-        except Exception:
-            pass
-
-    if isinstance(x, str):
-        x = x.strip()
-        for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y"):
-            try:
-                return datetime.strptime(x, fmt).strftime("%Y%m%d")
-            except ValueError:
-                continue
-
-    raise ValueError(f"Nieobsługiwany format daty: {x!r}")
-
-def clean_digits(s: str) -> str:
-    return re.sub(r"\D", "", str(s or ""))
-
-def normalize_nrb(account: str) -> str:
-    """Zwraca 26 cyfr NRB (lub pusty string, gdy format niepoprawny)."""
-    if not account:
-        return ""
-    acc = re.sub(r"\s", "", str(account))
-    if len(acc) == 26 and acc.isdigit():
-        return acc
-    if acc.upper().startswith("PL") and len(acc) == 28 and acc[2:].isdigit():
-        return acc[2:]
-    return ""
-
-def bank_code_from_nrb(nrb: str) -> str:
-    """8 cyfr rozliczeniowych (poz. 3-10) albo ''. """
-    nrb = normalize_nrb(nrb)
-    if len(nrb) >= 10:
-        return nrb[2:10]
-    return ""
-
-
-def handle_duplicates(df: pd.DataFrame,action: str = "error") -> pd.DataFrame:
-    d, full_dups = find_duplicates()
-
-    if full_dups.empty:
-        return df
-    preview_cols = ["Kontrahent","Numer dokumentu","Brutto"]
-    print("[DUP] Wykryto duplikaty:\n",full_dups[preview_cols].to_string(index=False))
-
-    if action == "error":
-        raise ValueError("W pliku znajdują się duplikaty (patrz log powyżej).")
-    elif action == "warn":
-        return df
-    elif action in ("drop_keep_first","drop_keep_last"):
-        keep = "first" if action == "drop_keep_first" else "last"
-        mask = d.duplicated(subset=["__doc_no_norm","__brut_gr"],keep=keep)
-        cleaned = df.loc[~mask].copy()
-        print(f"[DUP] Usunięto {mask.sum()} zduplikowanych wierszy ({action}).")
-        return cleaned
-    else:
-        raise ValueError(f"Nieznane actions = '{action}'")
 
 # Główna część logiki
 
-def czytaj_plik(file:str,spolka: str):
-    klucz = spolka.str().lower()
+# Wysyłanie emaili
+def send_email(sender_email: str, file):
+    port = 587
+    smtp_server = "smtp.gmail.com"
+    sender_email = os.getenv("SENDER_EMAIL")
+    receiver_email = "z dataframea"
+    password = os.getenv("PASSWORD")
 
+    message = MIMEMultipart("alternative")
+    message["Subject"] = "multipart test"
+    message["From"] = sender_email
+    message["To"] = receiver_email
+
+    text = """\
+        Treść testowego emaila
+    """
+
+    html = """\
+    <html> 
+        <body> 
+            <p>
+                Testowa treść pliku
+            </p>
+        </body>
+    </html>
+    """
+
+    part1 =MIMEText(text, "plain")
+    part2 = MIMEText(html,"html")
+
+def czytaj_plik(
+        file:str,
+        *,
+        spolka: str,
+        key: str,
+):
+    # klucz = dane spółki
     # konfiguracja danych spółki do generowania emaili
+
+    conf= COMPANIES[key]
+    nazwa_i_adres_zleceniodawcy = conf["name_addr"]
+    nr_rozliczeniowy_zleceniodawcy = conf["bank_code"]
+    company_rachyunek = conf["nrb"]
+
+    klucz = spolka.lower()
     if klucz not in COMPANIES:
         raise ValueError(f"Nieznana firma {spolka} popraw to")
-    conf = COMPANIES[klucz]
-    adres_spolki = conf["namer_addr"]
-
 
     df = pd.read_excel(file)
-    # wymagane są Kontrahent,Netto, Data_wystawienia,Nr_dokumentu
-    wymagane_kolumny ={"Data wystawienia","Netto","Kontrahent","Numer dokumentu"}
+
+    wymagane_kolumny ={"Data wystawienia","Netto","VAT","Brutto","Kontrahent","Numer dokumentu","NIP"}
+    # odczyszczanie danych z plików
+    df["NIP"] = df["NIP"].apply(nip_digits)
+    suma_stawki = df.groupby("NIP")[["Netto","VAT","Brutto"]].sum().reset_index()
+
+    print(suma_stawki)
 
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument(description="Generator faktur z fakturowni wraz z wysyłaniem ich bezpośrednio")
-    parser.add_argument("input",help="Ścieżka do xlsx z danymi do faktur")
+    parser = ArgumentParser(description="Automatyczne generowanie faktur do kontrahentów 3% za poprzedni miesiąc")
+    parser.add_argument("input", help="Ścieżka do xlsx z danymi do faktur")
+    parser.add_argument("-c", "--company", required=True, choices=sorted(COMPANIES.keys()),
+                        help=f"Firma (nadawca): {', '.join(sorted(COMPANIES.keys()))}")
+
     args = parser.parse_args()
-    czytaj_plik(args.input)
+
+    czytaj_plik(
+        file=args.input,
+        spolka=args.company,
+        key=args.company,
+    )
+

@@ -606,7 +606,6 @@ def _latin_safe_join(lines: list[str]) -> str:
     return "\n".join(_latin_safe(line) for line in lines)
 
 
-
 # =========================
 # Scraper REGON (Selenium)
 # =========================
@@ -636,15 +635,18 @@ class RegonScraper:
     def scrape_nip(self, nip: str) -> list[str]:
         d = self.driver
         d.get("https://wyszukiwarkaregon.stat.gov.pl/appBIR/index.aspx")
-        losowe_opoznienie(0.05, 0.15)
+        losowe_opoznienie(0.05, 0.25)
         d.find_element(By.ID, "txtNip").clear()
         d.find_element(By.ID, "txtNip").send_keys(str(nip))
         d.find_element(By.ID, "btnSzukaj").click()
         losowe_opoznienie(0.15, 0.3)
 
-        rows = d.find_elements(By.CLASS_NAME, "tabelaZbiorczaListaJednostekAltRow")
+        rows = d.find_elements(By.CLASS_NAME, "tabelaZbiorczaListaJednostekAltRow") + \
+               d.find_elements(By.CLASS_NAME, "tabelaZbiorczaListaJednostekRow")
+
         if not rows:
             return []
+
         cells = rows[0].find_elements(By.TAG_NAME, "td")
         return [c.text.strip() for c in cells]
 
@@ -665,25 +667,32 @@ def wyciagnij_adres_z_komorek(cells: list[str]) -> str:
 
 def get_or_fetch_adres(nip_clean: str, scraper: "RegonScraper") -> str:
     try:
+        # pobierz adres z bazy albo pusty
         adr = adres_z_bazy(nip_clean) or ""
+        # pobierz nazwę z bazy
+        nazwa = nazwa_z_bazy(nip_clean) or ""
         if not is_blank(adr):
-            return adr
+            return f"{nazwa}|{adr}" if nazwa else adr
     except Exception as e:
-        print(f"[W] Błąd DB przy pobieraniu adresu dla NIP {nip_clean}: {e}")
+        print(f"[W] Błąd DB przy pobieraniu adresu/nazwy dla NIP {nip_clean}: {e}")
 
     try:
         cells = scraper.scrape_nip(nip_clean)
-        losowe_opoznienie(0.05, 0.1)
+        losowe_opoznienie(0.09, 0.19)
         adr = wyciagnij_adres_z_komorek(cells)
+        nazwa = nazwa_z_bazy(nip_clean) or ""  # jeszcze raz sprawdzimy
         if not is_blank(adr):
+            full_val = f"{nazwa}|{adr}" if nazwa else adr
             try:
                 zapisz_adres_do_bazy(nip_clean, adr)
             except Exception as e:
                 print(f"[W] Nie udało się zapisać adresu do DB dla NIP {nip_clean}: {e}")
-        return adr or ""
+            return full_val
+        return nazwa or ""
     except Exception as e:
         print(f"[W] Błąd scrapera REGON dla NIP {nip_clean}: {e}")
-        return ""
+        return nazwa or ""
+
 
 def get_or_fetch_konto(nip_clean: str) -> str:
     try:
@@ -702,6 +711,13 @@ def csv_quote(s: str) -> str:
 # =========================
 # Budowa rekordu
 # =========================
+
+def nazwa_z_bazy(nip: str) -> str | None:
+    nip_num = int(nip_digits(nip))
+    rec = db_fetchone("SELECT nazwa FROM Merchanci WHERE nip = %s", (nip_num,))
+    if rec and rec.get("nazwa"):
+        return cut_to_30(sanitize_text(rec["nazwa"]))
+    return None
 
 def build_payment_record(
     data_platnosci: str,
@@ -790,6 +806,11 @@ def handle_duplicates(df: pd.DataFrame, action: str = "error") -> pd.DataFrame:
         return cleaned
     else:
         raise ValueError(f"Nieznane action='{action}'")
+
+def cut_to_30(s: str) -> str:
+    if not s:
+        return ""
+    return s[:30]
 
 def export_duplicates_report(df: pd.DataFrame, out_path: str):
     _, full_dups = find_duplicates(df)
