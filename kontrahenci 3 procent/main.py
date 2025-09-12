@@ -287,20 +287,28 @@ def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
                 result[str(row["nip"])] = row["status"]
     return result
 
-def fetch_emails(df :pd.DataFrame) -> pd.DataFrame:
-    nipy = df["nip"].unique().toList
+# TODO problem to typ danych 
+def fetch_emails(nipy) -> pd.DataFrame:
+    print("NIPY typ:")
+    print(type(nipy))
+
+    nipy = nipy.to_string(index = False)
+    print("NIPY typ:")
+    print(type(nipy))
+
     if not nipy:
         return pd.DataFrame(columns=["nip", "email"])
 
     query = """
-           SELECT nip, email
-           FROM merchanci
-           WHERE nip = ANY(%s)
-       """
+        SELECT nip, email
+        FROM merchanci
+        WHERE nip = ANY(%s::text[])
+    """
 
     with db_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (nipy,))
+            # wymuszamy listę stringów
+            cur.execute(query, (list(map(str, nipy)),))
             rows = cur.fetchall()
 
     return pd.DataFrame(rows)
@@ -329,8 +337,10 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
 # Główna część logiki
 
 # Wysyłanie emaili
-def send_email(df: pd.DataFrame):
-    emails_df = fetch_emails(df)
+def send_email(nipy: pd.Series):
+    # print("DEBUG send_email")
+    # print(df)
+    emails_df = fetch_emails(nipy)
 
     for _, row in emails_df.iterrows():
         nip = row["nip"]
@@ -422,6 +432,8 @@ def czytaj_plik(
         df.loc[mask_prem].to_csv(os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv"), index=False, encoding="utf-8-sig")
     df = df.loc[~mask_prem].copy()
 
+    # print("DEBUG NIPY")
+    # print(df)
     send_email(df["NIP"])
 
     if df.empty:
