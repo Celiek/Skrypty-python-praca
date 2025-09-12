@@ -1,3 +1,4 @@
+import logging
 import pandas as pd
 from argparse import ArgumentParser, BooleanOptionalAction
 from typing import Optional
@@ -9,6 +10,7 @@ from datetime import datetime,timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import psycopg2
+from pandas.core.interchange.dataframe_protocol import DataFrame
 from psycopg2.extras import RealDictCursor,execute_values
 
 
@@ -16,12 +18,21 @@ from psycopg2.extras import RealDictCursor,execute_values
 # potem pobiera dane z fakturowni (może)
 # wysyła emaile z fakturami do listy kontrahentów z plików
 
+#TODO
+# 1. ODczytywać, serializować i oczysczać dane z pliku xlsx DONE
+# 2. Generować plik z raportami dla każdego kontrahenta
+# 3. Generować fakturę na fakturowni (pobierać z api linki dla każdego z kontrahentów)
+# 3. Wysyłać email z fakturą i raportem do klienta
+
+
 ####
 # Konfiguracja i pomniejsze narzędzia
 ####
 
-API_KEY = "K88WQTGPSBiuGdLgwHrc"
-OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING").lower()
+API_KEY = os.getenv('API_KEY')
+OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING")
+
+load_dotenv()
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -51,6 +62,7 @@ COMPANIES = {
         "bank_code": os.getenv("EXTRASTORE_BANK_CODE", "11402004"),  # 8 cyfr
     },
 }
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def _norm_doc_no(x: str) -> str:
     if pd.isna(x):
@@ -83,11 +95,7 @@ def serializacja_dat(x) -> str:
     raise ValueError(f"Nieobsługiwany format daty: {x!r}")
 
 def db_conn():
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
-        yield conn
-    finally:
-        conn.close()
+    return psycopg2.connect(**DB_CONFIG)
 
 def validate_df(
     df: pd.DataFrame,
@@ -279,15 +287,35 @@ def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
                 result[str(row["nip"])] = row["status"]
     return result
 
-# Metoda usuwania duplikatów
-def handle_duplicates(df: pd.DataFrame,action: str = "error") -> pd.DataFrame:
-    required = {"Data wystawienia","Netto","VAT","Brutto","Kontrahent","Numer dokumentu","NIP"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Brak kolumn: {'",'.join(sorted(missing))}")
+def fetch_emails(df :pd.DataFrame) -> pd.DataFrame:
+    nipy = df["nip"].unique().toList
+    if not nipy:
+        return pd.DataFrame(columns=["nip", "email"])
 
-    d = df.copy()
-    mdup = d.duplicated(subset=["Numer dokumentu", "Netto", "Vat", "Brutto"], keep="first")
+    query = """
+           SELECT nip, email
+           FROM merchanci
+           WHERE nip = ANY(%s)
+       """
+
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (nipy,))
+            rows = cur.fetchall()
+
+    return pd.DataFrame(rows)
+
+# Metoda usuwania duplikatów
+def handle_duplicates(df: pd.DataFrame, action: str = "warn") -> pd.DataFrame:
+    before = len(df)
+    df = df.drop_duplicates(subset=["NIP", "Numer dokumentu"], keep="first")
+    after = len(df)
+
+    if action == "warn" and before != after:
+        print(f"[INFO] Usunięto {before - after} duplikatów. Zostało {after} rekordów.")
+
+    return df
+
 
 def export_duplicates_report(df: pd.DataFrame, out_path: str):
     _, full_dups = find_duplicates(df)
@@ -301,82 +329,82 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
 # Główna część logiki
 
 # Wysyłanie emaili
-def send_email(sender_email: str, file):
-    port = 587
-    smtp_server = "smtp.gmail.com"
-    sender_email = os.getenv("SENDER_EMAIL")
-    receiver_email = "z dataframea"
-    password = os.getenv("PASSWORD")
+def send_email(df: pd.DataFrame):
+    emails_df = fetch_emails(df)
 
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "multipart test"
-    message["From"] = sender_email
-    message["To"] = receiver_email
+    for _, row in emails_df.iterrows():
+        nip = row["nip"]
+        email = row["email"]
+        if email:
+            print(f"Wysyłam mail do NIP={nip}, email={email}")
+            sender_email = os.getenv("SENDER_EMAIL")
 
-    text = """\
-        Treść testowego emaila
-    """
+            message = MIMEMultipart("alternative")
+            message["Subject"] = "multipart test"
+            message["From"] = email
+            message["To"] = "testowy_test@test.cvl"
 
-    html = """\
-    <html> 
-        <body> 
-            <p>
-                Testowa treść pliku
-            </p>
-        </body>
-    </html>
-    """
+            text = """\
+                Treść testowego emaila
+            """
 
-    part1 =MIMEText(text, "plain")
-    part2 = MIMEText(html,"html")
+            html = """\
+            <html> 
+                <body> 
+                    <p>
+                        Testowa treść pliku
+                    </p>
+                    <h1> Twój email</h1>
+                </body>
+            </html>
+            """
+
+            part1 =MIMEText(text, "plain")
+            part2 = MIMEText(html,"html")
+
+            message.attach(part1)
+            message.attach(part2)
+
+            with smtplib.SMTP("localhost", 1025) as server:
+                server.sendmail("testowy_test@test.cvl", email, message.as_string())
 
 def czytaj_plik(
         file:str,
         *,
         spolka: str,
         key: str,
-        output_path: Optional[str] = None,
-):
-    # klucz = dane spółki
-    # konfiguracja danych spółki do generowania emaili
+        output_file: str | None = None,
+) -> pd.DataFrame:
+
 
     conf= COMPANIES[key]
     nazwa_i_adres_zleceniodawcy = conf["name_addr"]
     nr_rozliczeniowy_zleceniodawcy = conf["bank_code"]
     company_rachyunek = conf["nrb"]
 
+    #wybór spółki na którą faktura ma być wystawiona
     klucz = spolka.lower()
     if klucz not in COMPANIES:
         raise ValueError(f"Nieznana firma {spolka} popraw to")
-    # wczytywanie pliku + ususwanie duplikatów
+
+    # wczytywanie pliku + ususwanie duplikatów + usuwanie pustych rzędów
     df = pd.read_excel(file)
+
+    if df is None:
+        raise ValueError("DataFrame jest None – sprawdź czy poprawnie wczytałeś dane!")
+    df = df.replace("", pd.NA)
     df = handle_duplicates(df,action="warn")
 
-    wymagane_kolumny ={"Data wystawienia","Netto","VAT","Brutto","Kontrahent","Numer dokumentu","NIP"}
     # serializacja nipu
     df["NIP"] = df["NIP"].apply(nip_digits)
     suma_stawki = df.groupby("NIP")[["Netto","VAT","Brutto"]].sum().reset_index()
-    brak = wymagane_kolumny - set(df.columns)
-    if brak:
-        print(f"[INFO] Brak kolumn: {brak}")
-        return ""
+    if suma_stawki.empty:
+        print("dataframe jest pusty")
+    print("stawki zsumowane")
+    print(suma_stawki)
 
     # Timestamp
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    df, error_log = validate_df(
-        df,
-        date_col="Data wpływu",
-        netto_col="Netto",
-        vat_col="VAT",
-        brutto_col="Brutto",
-        tol=0.01,
-        on_error="keep",
-    )
-    export_error_log(error_log, os.path.join(OUTPUT_DIR, f"errors_{ts}.csv"))
-
-    print("stawki zsumowane")
-    print(suma_stawki)
 
     #  walidacja ujemnych kwot na fakturach:
     mask_negative = (df["Netto"] < 0) | (df["VAT"] < 0) | (df["Brutto"] < 0)
@@ -384,11 +412,6 @@ def czytaj_plik(
         print(f"[WARN] Pomijam {int(mask_negative.sum())} wierszy z ujemnymi kwotami (zapisano raport).")
         df.loc[mask_negative].to_csv(os.path.join(OUTPUT_DIR, f"ujemne_{ts}.csv"), index=False, encoding="utf-8-sig")
     df = df.loc[~mask_negative].copy()
-    if df.empty:
-        with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
-            f.write("")
-        print("[INFO] Po filtracji brak poprawnych wierszy.")
-        return
 
     status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
     mask_prem = df["NIP"].astype(str).apply(
@@ -398,17 +421,19 @@ def czytaj_plik(
         print(f"[WARN] Pomijam {int(mask_prem.sum())} wierszy od kontrahentów PREMERCHANT (zapisano raport).")
         df.loc[mask_prem].to_csv(os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv"), index=False, encoding="utf-8-sig")
     df = df.loc[~mask_prem].copy()
+
+    send_email(df["NIP"])
+
     if df.empty:
-        with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
-            f.write("")
         print("[INFO] Po filtracji brak poprawnych wierszy (po PREMERCHANT).")
-        return
+        return df
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Automatyczne generowanie faktur do kontrahentów 3% za poprzedni miesiąc")
     parser.add_argument("input", help="Ścieżka do xlsx z danymi do faktur")
     parser.add_argument("-c", "--company", required=True, choices=sorted(COMPANIES.keys()),
                         help=f"Firma (nadawca): {', '.join(sorted(COMPANIES.keys()))}")
+    parser.add_argument("-o","--output",help="nazwa pliku oo którego ma zostać zapisany ...")
 
     args = parser.parse_args()
 
@@ -416,5 +441,7 @@ if __name__ == "__main__":
         file=args.input,
         spolka=args.company,
         key=args.company,
+        output_file = args.output
+
     )
 
