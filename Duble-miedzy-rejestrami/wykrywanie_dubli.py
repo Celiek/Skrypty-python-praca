@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import time
 
-input_file = "zakup do czerwca do dzisaj shumee 2025.xlsx"
+input_file = "shumee 01.06-15.09.xlsx"
 
 # wczytanie pliku
 df = pd.read_excel(input_file, dtype=str)   # wymusza odczyt wszystkiego jako tekst
@@ -12,10 +12,10 @@ for col in ["NIP", "Numer dokumentu"]:
     df[col] = df[col].astype(str).str.lstrip("'").str.strip()
 
 # sprawdzanie duplikatów
-dups = df[df.duplicated(subset=["NIP", "Numer dokumentu"], keep=False)]
+dups = df[df.duplicated(subset=["NIP", "Numer dokumentu","Brutto","Netto"], keep=False)]
 
 if dups.empty:
-    print("[DUP] Brak duplikatów 🎉")
+    print("[DUP] Brak duplikatów !")
 else:
     print(f"[DUP] Znaleziono {len(dups)} duplikatów w pliku!")
     print(dups[["NIP", "Numer dokumentu"]].to_string(index=False))
