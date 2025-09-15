@@ -287,14 +287,20 @@ def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
                 result[str(row["nip"])] = row["status"]
     return result
 
-# TODO problem to typ danych 
+# TODO problem to typ danych
 def fetch_emails(nipy) -> pd.DataFrame:
-    print("NIPY typ:")
-    print(type(nipy))
+    print("DEBUG: wejście typu", type(nipy))
 
-    nipy = nipy.to_string(index = False)
-    print("NIPY typ:")
-    print(type(nipy))
+    if isinstance(nipy, pd.Series):
+        nipy = nipy.dropna().astype(str).str.strip().unique().tolist()
+    elif isinstance(nipy, (list, tuple)):
+        nipy = [str(n).strip() for n in nipy if n]
+    elif isinstance(nipy, pd.DataFrame):
+        nipy = nipy["NIP"].dropna().astype(str).str.strip().unique().tolist()
+    else:
+        nipy = [str(nipy).strip()]
+
+    #print("DEBUG: wyczyszczone NIPY:", nipy)
 
     if not nipy:
         return pd.DataFrame(columns=["nip", "email"])
@@ -302,13 +308,12 @@ def fetch_emails(nipy) -> pd.DataFrame:
     query = """
         SELECT nip, email
         FROM merchanci
-        WHERE nip = ANY(%s::text[])
+        WHERE nip = ANY(%s::bigint[])
     """
 
     with db_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # wymuszamy listę stringów
-            cur.execute(query, (list(map(str, nipy)),))
+            cur.execute(query, (nipy,))   # tu idzie LISTA stringów
             rows = cur.fetchall()
 
     return pd.DataFrame(rows)
@@ -337,9 +342,9 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
 # Główna część logiki
 
 # Wysyłanie emaili
-def send_email(nipy: pd.Series):
-    # print("DEBUG send_email")
-    # print(df)
+def send_email(nipy: pd.DataFrame):
+    print("DEBUG send_email")
+    print(nipy)
     emails_df = fetch_emails(nipy)
 
     for _, row in emails_df.iterrows():
@@ -386,6 +391,8 @@ def czytaj_plik(
         output_file: str | None = None,
 ) -> pd.DataFrame:
 
+    # Timestamp
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     conf= COMPANIES[key]
     nazwa_i_adres_zleceniodawcy = conf["name_addr"]
@@ -405,6 +412,16 @@ def czytaj_plik(
     df = df.replace("", pd.NA)
     df = handle_duplicates(df,action="warn")
 
+    mask_empty_nip = df["NIP"].isna() | (df["NIP"].astype(str).str.strip() == "")
+    if mask_empty_nip.any():
+        print(f"[WARN] Pomijam {int(mask_empty_nip.sum())} wierszy z pustym NIP-em (zapisano raport).")
+        df.loc[mask_empty_nip].to_csv(
+            os.path.join(OUTPUT_DIR, f"brak_nipu_{ts}.csv"),
+            index=False,
+            encoding="utf-8-sig"
+        )
+    df = df.loc[~mask_empty_nip].copy()
+
     # serializacja nipu
     df["NIP"] = df["NIP"].apply(nip_digits)
     suma_stawki = df.groupby("NIP")[["Netto","VAT","Brutto"]].sum().reset_index()
@@ -412,9 +429,6 @@ def czytaj_plik(
         print("dataframe jest pusty")
     print("stawki zsumowane")
     print(suma_stawki)
-
-    # Timestamp
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     #  walidacja ujemnych kwot na fakturach:
     mask_negative = (df["Netto"] < 0) | (df["VAT"] < 0) | (df["Brutto"] < 0)
@@ -434,7 +448,7 @@ def czytaj_plik(
 
     # print("DEBUG NIPY")
     # print(df)
-    send_email(df["NIP"])
+    send_email(suma_stawki)
 
     if df.empty:
         print("[INFO] Po filtracji brak poprawnych wierszy (po PREMERCHANT).")

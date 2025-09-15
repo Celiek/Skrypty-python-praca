@@ -3,6 +3,8 @@ import logging
 import pandas as pd
 import psycopg2
 
+# uszuplenia dane w bazie danych z pliku json na podstawie nip
+
 # --- Konfiguracja logowania ---
 logging.basicConfig(
     filename="import_kontrahenci.log",
