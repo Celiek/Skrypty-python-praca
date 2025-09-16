@@ -1,18 +1,18 @@
 import logging
-import pandas as pd
-from argparse import ArgumentParser, BooleanOptionalAction
-from typing import Optional
-from dotenv import load_dotenv
-import smtplib,ssl
 import os
 import re
-from datetime import datetime,timedelta
-from email.mime.text import MIMEText
+import smtplib
+from argparse import ArgumentParser
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
-import psycopg2
-from pandas.core.interchange.dataframe_protocol import DataFrame
-from psycopg2.extras import RealDictCursor,execute_values
+from email.mime.text import MIMEText
 
+import pandas as pd
+import psycopg2
+import requests
+from dateutil.relativedelta import relativedelta
+from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
 
 # Program odczytuje dane z pliku xlsx i wysyłą dane do fakturowni
 # potem pobiera dane z fakturowni (może)
@@ -29,10 +29,10 @@ from psycopg2.extras import RealDictCursor,execute_values
 # Konfiguracja i pomniejsze narzędzia
 ####
 
+load_dotenv()
+
 API_KEY = os.getenv('API_KEY')
 OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING")
-
-load_dotenv()
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -96,6 +96,92 @@ def serializacja_dat(x) -> str:
 
 def db_conn():
     return psycopg2.connect(**DB_CONFIG)
+
+# Zwraca listę faktur wygenerowanych w ciągu dnia (dzisiaj)
+# Wymagane do wysyłania faktur do kontrahentów
+def lista_faktur():
+    today = datetime.today()
+    today_str = today.strftime("%Y-%m-%d")
+
+    url = "https://shumee.fakturownia.pl/invoices.json"
+    params = {
+        "period": "this_month",
+        "api_token": API_KEY,
+        "page": 1,
+        "issue_date": today_str
+    }
+
+    r = requests.get(url, params=params)
+    r.raise_for_status()
+    data = r.json()
+    wynik = [f for f in data if f.get("number", "").endswith("/sm3")]
+    return wynik
+
+
+def dodaj_faktury(
+        spolka: str,
+        df: pd.DataFrame,
+        ):
+
+    department_id = ""
+
+    if spolka == "shumee":
+        department_id = 1705441
+    elif spolka == "extrastore":
+        department_id = 1705460
+    elif spolka == "greatstore":
+        department_id = 1705454
+    else:
+        print("Niepoprawny klucz firmy wpisz poprawny i spróbuj ponownie")
+        return None
+
+    date = datetime.today()
+    future_date = date + timedelta(days=14)
+
+    miesiace = {
+        1: "styczeń", 2: "luty", 3: "marzec", 4: "kwiecień",
+        5: "maj", 6: "czerwiec", 7: "lipiec", 8: "sierpień",
+        9: "wrzesień", 10: "październik", 11: "listopad", 12: "grudzień"
+    }
+
+    poprzedni = date - relativedelta(months=1)
+
+    url = "https://shumee.fakturownia.pl/invoices.json"
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "api_token": API_KEY,
+        "invoice": {
+            "kind": "vat",
+            "number": None,  # None = null
+            "sell_date": date.strftime("%Y-%m-%d"),
+            "issue_date": date.strftime("%Y-%m-%d"),
+            "payment_to": future_date.strftime("%Y-%m-%d"),
+            "buyer_name": df["Kontrahent"],
+            "buyer_email": "testowy@email.com",
+            "buyer_tax_no": df["NIP"],
+            "department_id": department_id,
+            "positions": [
+                {
+                    "name": f"płatność za usługę za okres {miesiace[poprzedni.month]}",
+                    "tax": 23,
+                    "total_price_gross": df["Brutto"],
+                    "quantity": 1
+                }
+            ]
+        }
+    }
+
+    # print('DEBUG dodaj_faktury')
+    # print(payload)
+
+    r = requests.post(url, json=payload,headers=headers)
+    r.raise_for_status()
+    return "dodano fakturę dla shumee"
 
 def validate_df(
     df: pd.DataFrame,
@@ -287,7 +373,6 @@ def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
                 result[str(row["nip"])] = row["status"]
     return result
 
-# TODO problem to typ danych
 def fetch_emails(nipy) -> pd.DataFrame:
     print("DEBUG: wejście typu", type(nipy))
 
@@ -394,11 +479,6 @@ def czytaj_plik(
     # Timestamp
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    conf= COMPANIES[key]
-    nazwa_i_adres_zleceniodawcy = conf["name_addr"]
-    nr_rozliczeniowy_zleceniodawcy = conf["bank_code"]
-    company_rachyunek = conf["nrb"]
-
     #wybór spółki na którą faktura ma być wystawiona
     klucz = spolka.lower()
     if klucz not in COMPANIES:
@@ -424,7 +504,7 @@ def czytaj_plik(
 
     # serializacja nipu
     df["NIP"] = df["NIP"].apply(nip_digits)
-    suma_stawki = df.groupby("NIP")[["Netto","VAT","Brutto"]].sum().reset_index()
+    suma_stawki = df.groupby("NIP")[["Netto","VAT","Brutto","Kontrahent"]].sum().reset_index()
     if suma_stawki.empty:
         print("dataframe jest pusty")
     print("stawki zsumowane")
@@ -446,9 +526,14 @@ def czytaj_plik(
         df.loc[mask_prem].to_csv(os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv"), index=False, encoding="utf-8-sig")
     df = df.loc[~mask_prem].copy()
 
-    # print("DEBUG NIPY")
-    # print(df)
-    send_email(suma_stawki)
+    print("DEBUG NIPY")
+    print(suma_stawki)
+    # send_email(suma_stawki)
+    # print('Test lista faktur')
+    # faktury =lista_faktur()
+    # print(faktury)
+    # print("Dodaje faktury")
+     dodaj_faktury(spolka, suma_stawki)
 
     if df.empty:
         print("[INFO] Po filtracji brak poprawnych wierszy (po PREMERCHANT).")
@@ -468,6 +553,5 @@ if __name__ == "__main__":
         spolka=args.company,
         key=args.company,
         output_file = args.output
-
     )
 
