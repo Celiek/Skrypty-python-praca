@@ -3,6 +3,7 @@ import os
 import re
 import smtplib
 import ssl
+from email.mime.application import MIMEApplication
 from pathlib import Path
 
 import unicodedata
@@ -438,6 +439,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
+_WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
+_WINDOWS_RESERVED  = {
+    "CON","PRN","AUX","NUL",
+    *(f"COM{i}" for i in range(1,10)),
+    *(f"LPT{i}" for i in range(1,10)),
+}
+
 # =========================
 # Utils
 # =========================
@@ -450,41 +458,53 @@ def nip_digits(nip: str) -> str:
         logging.warning("NIP ma nieprawidłową długość: %s → %s", nip, cleaned)
     return cleaned
 
-def prepare_recipients(rows_from_build: List[Dict], wyniki_faktur: List[Dict]) -> pd.DataFrame:
+def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     """
-    rows_from_build: elementy z build_invoice_rows (mają 'buyer_tax_no' oraz 'buyer_email')
-    wyniki_faktur: output z dodaj_faktury (ma 'nip','ok','link')
-
-    Zwraca DF z kolumnami: nip, email, kontrahent, invoice_link
+    Tworzy bezpieczną nazwę pliku dla Windows/macOS/Linux:
+    - podmienia niedozwolone znaki (w tym cudzysłów i apostrof) na '_',
+    - zwija wielokrotne '_' w jedno,
+    - usuwa kropki/spacje z końca,
+    - unika nazw zarezerwowanych (CON/PRN/AUX/NUL/COM1../LPT1..).
     """
-    # z 'rows' bierzemy maila i nazwę
-    df_rows = pd.DataFrame(rows_from_build)
-    df_rows.rename(columns={
-        "buyer_tax_no": "nip",
-        "buyer_email": "email",
-        "buyer_name": "kontrahent"
-    }, inplace=True)
-    df_rows["nip"] = df_rows["nip"].astype(str).str.strip()
-
-    # z wyników faktur bierzemy linki
-    df_res = pd.DataFrame(wyniki_faktur)
-    if df_res.empty:
-        df_res = pd.DataFrame(columns=["nip","link","ok"])
-    df_res["nip"] = df_res["nip"].astype(str).str.strip()
-
-    out = df_rows.merge(df_res[["nip","link","ok"]], on="nip", how="left")
-    # można odsiać tylko udane wystawienia
-    out = out.loc[out["ok"] == True].copy()
-    return out
-
-def _slugify_filename(s: str, max_len: int = 40) -> str:
     if not s:
-        return ""
-    s = str(s).strip()
-    s = unicodedata.normalize("NFKD",s)
-    s = "".join (ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"[A^Zz-z0-9_.-]+","_",s)
-    return s[:max_len].strip("_") or "kontrahent"
+        return "plik"
+
+    # normalizacja + usunięcie diakrytyków
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.strip()
+
+    # wymiana wszystkich niedozwolonych na '_'
+    s = "".join(("_" if ch in _WINDOWS_FORBIDDEN or ch in {"'", "`"} else ch) for ch in s)
+
+    # przepuszczamy tylko [A-Za-z0-9_. -], resztę na '_'
+    s = re.sub(r"[^A-Za-z0-9_. \-]", "_", s)
+
+    # zwijanie wielokrotnych podkreślników/spacji
+    s = re.sub(r"[ _]+", " ", s)      # najpierw łączymy w pojedyncze spacje
+    s = s.replace(" ", "_")           # potem spacje -> podkreślniki
+    s = re.sub(r"_+", "_", s)
+
+    # usunięcie kropek/spacji/podkreślników z początku/końca
+    s = s.strip(" ._")
+
+    # pusta po czyszczeniu?
+    if not s:
+        s = "plik"
+
+    # unikamy nazw zarezerwowanych (bez rozszerzenia)
+    base_upper = s.upper()
+    if base_upper in _WINDOWS_RESERVED:
+        s = f"_{s}"
+
+    # ograniczenie długości
+    s = s[:max_len].rstrip(" ._")
+
+    # jeszcze raz awaryjnie
+    if not s:
+        s = "plik"
+
+    return s
 
 def export_grouped_csvs(df: pd.DataFrame,out_dir: str, *, encoding: str ="utf-8-sig") -> Dict[str,str]:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -643,7 +663,7 @@ def get_invoice_public_url(invoice_id: int, api_key: str) -> Optional[str]:
         r = requests.get(url, params={"api_token": api_key}, timeout=30)
         r.raise_for_status()
         data = r.json()
-        # Fakturownia zazwyczaj zwraca 'view_url' (link do podglądu) oraz np. 'print_url'
+
         for key in ("view_url", "public_url", "print_url", "download_url"):
             if data.get(key):
                 return data[key]
@@ -660,6 +680,7 @@ def send_Email(spolka: str,recipents_df: pd.DataFrame,*,subject: Optional[str] =
     host = cfg["server_host"]
     port = int(os.getenv("SMTP_PORT","465"))
     use_ssl = os.getenv("SMTP_USE_SSL", "1") == "1"
+
     company_name = cfg.get("name") or spolka.upper()
     if not subject:
         subject = f"{company_name} - faktura"
@@ -689,6 +710,7 @@ def send_Email(spolka: str,recipents_df: pd.DataFrame,*,subject: Optional[str] =
             email_to = (getattr(row, "email", None) or "").strip()
             invoice_link = (getattr(row, "link", None) or getattr(row, "invoice_link", None) or "").strip()
             kontrahent = (getattr(row, "kontrahent", "") or "").strip()
+            attach_path = (getattr(row, "attachment_path", "") or "").strip()
 
             if not email_to:
                 results.append({"email": None, "ok": False, "error": "Brak adresu email"})
@@ -703,7 +725,18 @@ def send_Email(spolka: str,recipents_df: pd.DataFrame,*,subject: Optional[str] =
             msg["From"] = from_addr
             msg["To"] = email_to
 
-            msg.attach(MIMEText(html_body, "html", "utf-8"))
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText(html_body, "html", "utf-8"))
+            msg.attach(alt)
+
+            # ZAŁĄCZNIK (jeśli jest)
+            if attach_path and os.path.isfile(attach_path):
+                with open(attach_path, "rb") as f:
+                    part = MIMEApplication(f.read())
+                # ładna nazwa pliku
+                filename = os.path.basename(attach_path)
+                part.add_header("Content-Disposition", "attachment", filename=filename)
+                msg.attach(part)
 
             try:
                 server.sendmail(from_addr, [email_to], msg.as_string())
@@ -718,6 +751,7 @@ def send_Email(spolka: str,recipents_df: pd.DataFrame,*,subject: Optional[str] =
                 server.quit()
             except Exception:
                 pass
+
     return results
 
 
@@ -806,6 +840,11 @@ def get_spolka_config(spolka: str) -> dict:
 # =========================
 # Główna logika
 # =========================
+
+#Dodać wysyłanie samych faktur jako załącznik,
+# dodać samo wysyłanie bez generowania faktur
+# dodać opcję sprawdzania białej listy podatników
+# dodać wczytywanie i sprawdzanie listy jako drugiego pliku z listą kontrahentów
 def czytaj_plik(
     file: str,
     *,
@@ -815,13 +854,13 @@ def czytaj_plik(
 ) -> Optional[pd.DataFrame]:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-
+    att_dir = os.path.join(OUTPUT_DIR, f"zalaczniki_{ts}")
     # 1) wczytanie
     df = pd.read_excel(file)
     if df is None or df.empty:
         raise ValueError("Pusty DataFrame – sprawdź plik wejściowy.")
+
+    attachments_by_nip = export_grouped_csvs(df, att_dir, encoding=OUTPUT_ENCODING)
 
     # 2) czyszczenia
     df = df.replace("", pd.NA)
@@ -879,7 +918,7 @@ def czytaj_plik(
 
     # 5) wysyłanie faktur emailem
 
-    recipients_df = prepare_recipients(rows, wyniki)  # NIP->email + link
+    recipients_df = prepare_recipients(rows, wyniki,attachments_by_nip)  # NIP->email + link
     mail_results = send_Email(spolka, recipients_df)
     mail_ok = sum(1 for r in mail_results if r["ok"])
     mail_bad = len(mail_results) - mail_ok
