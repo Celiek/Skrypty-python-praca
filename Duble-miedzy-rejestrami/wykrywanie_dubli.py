@@ -2,14 +2,18 @@ import pandas as pd
 import os
 import time
 
-input_file = "shumee 01.06-15.09.xlsx"
+input_file = "great 08-09 (1).xlsx"
 
 # wczytanie pliku
 df = pd.read_excel(input_file, dtype=str)   # wymusza odczyt wszystkiego jako tekst
+print(df.head())
+print("Kolumny w pliku:", df.columns.tolist())
 
 # usunięcie ewentualnego apostrofu z przodu
 for col in ["NIP", "Numer dokumentu"]:
     df[col] = df[col].astype(str).str.lstrip("'").str.strip()
+df["NIP"] = df["NIP"].str.replace(r"\D", "", regex=True)
+
 
 # sprawdzanie duplikatów
 dups = df[df.duplicated(subset=["NIP", "Numer dokumentu","Brutto","Netto"], keep=False)]

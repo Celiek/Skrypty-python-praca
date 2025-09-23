@@ -2,7 +2,7 @@ from lxml import etree
 
 # Parser z zachowaniem CDATA
 parser = etree.XMLParser(strip_cdata=False)
-tree = etree.parse("dokumenty_SHUMEE_2025_9.xml", parser)
+tree = etree.parse("dokumenty_SHUMEE_2025_9 (1) (1).xml", parser)
 root = tree.getroot()
 
 count = 0
