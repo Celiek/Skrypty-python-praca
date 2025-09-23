@@ -1,20 +1,20 @@
-# Write a full corrected script to a file for the user to download
-from textwrap import dedent
-
+import logging
 import os
 import re
 import sys
 import time
 import traceback
-import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
+import psycopg2
+from sqlalchemy import create_engine
 
 import pandas as pd
 from sqlalchemy import create_engine, text, Table, MetaData
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.types import DateTime, Integer, BigInteger, String
+
 
 #################################
 # USTAWIENIA PROGRAMU / UTILITIES
@@ -22,7 +22,7 @@ from sqlalchemy.types import DateTime, Integer, BigInteger, String
 
 # instrukcja : po pobraniu pliku xlsx z clickupa zmienić nazwę kolumny w pliku ze status(2) na 
 # relation status i dopiero wtedy plik zostanie przyjęty 
-
+load_dotenv()
 def setup_logging():
     logger = logging.getLogger("loader")
     if logger.handlers:
@@ -60,31 +60,33 @@ install_short_excepthook()
 pd.set_option('future.no_silent_downcasting', True)
 
 # --- KONFIG ---
-EXCEL_PATH = os.getenv("EXCEL_PATH", "clickup_tasks_clean3.xlsx")
-DB_URL = os.getenv("DB_URL", "postgresql+psycopg2://gabriel:lhj7r7nk7e@localhost:5432/merchanci")  # zmień na ENV w produkcji
+EXCEL_PATH = os.getenv("EXCEL_PATH", "clickup_tasks_clean.xlsx")
+DB_URL = os.getenv("DB_URL")  # zmień na ENV w produkcji
 LOCAL_TZ = ZoneInfo("Europe/Warsaw")
 CHUNK_SIZE = 1000  # batch UPSERT
 
 # REGEX DO EMOJI
 _EMOJI_RE = re.compile(
-    "["
-    "\\U0001F600-\\U0001F64F"  # emotikony
-    "\\U0001F300-\\U0001F5FF"  # symbole/piktogramy
-    "\\U0001F680-\\U0001F6FF"  # transport/mapy
-    "\\U0001F700-\\U0001F77F"
-    "\\U0001F780-\\U0001F7FF"
-    "\\U0001F800-\\U0001F8FF"
-    "\\U0001F900-\\U0001F9FF"
-    "\\U0001FA00-\\U0001FA6F"
-    "\\U0001FA70-\\U0001FAFF"
-    "\\u2600-\\u26FF"          # znaki pogody/astr.
-    "\\u2700-\\u27BF"          # dingbats
-    "\\u2B00-\\u2BFF"
-    "\\u2300-\\u23FF"
-    "\\u200D"                  # zero-width joiner
-    "\\uFE0E-\\uFE0F"          # selektory wariantów
-    "]+"
+    r"["
+    "\U0001F600-\U0001F64F"  # emotikony
+    "\U0001F300-\U0001F5FF"  # symbole/piktogramy
+    "\U0001F680-\U0001F6FF"  # transport/mapy
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\u2600-\u26FF"           # znaki pogody/astr.
+    "\u2700-\u27BF"           # dingbats
+    "\u2B00-\u2BFF"
+    "\u2300-\u23FF"
+    "\u200D"                  # zero-width joiner
+    "\uFE0E-\uFE0F"           # selektory wariantów
+    "]+",
+    flags=re.UNICODE
 )
+
 
 def strip_emoji(s: str) -> str:
     return _EMOJI_RE.sub("", s)
@@ -162,7 +164,7 @@ def norm_ts(x):
 
 EMOJI_RE = re.compile(
     "["
-    "\\U0001F300-\\U0001FAFF"
+    "\U0001F300-\U0001FAFF"
     "\\u2600-\\u26FF\\u2700-\\u27BF\\u2B00-\\u2BFF\\u2300-\\u23FF"
     "\\u200D\\uFE0E-\\uFE0F"
     "]+"
@@ -346,7 +348,7 @@ def wczytaj_plik():
     # df_norm["data_aktualizacji"] = df["Data aktualizacji"].apply(norm_ts) 
     df_norm["przypisani"] = df["Przypisani"].apply(lambda v: norm_text(v, 100))
     df_norm["category"] = df["Category"].apply(lambda v: norm_text(v, 400))
-    df_norm["regulations_acceptance"] = df["Regulations accept"].apply(norm_bool)
+    #df_norm["regulations_acceptance"] = df["Regulations accept"].apply(norm_bool)
     df_norm["merchant_group"] = df["Merchant Group"].apply(lambda v: norm_text(v, 300))
     df_norm["base_account_type"] = df["Base. Account Type"].apply(norm_int)
 
@@ -528,13 +530,28 @@ def wczytaj_plik():
             _bad_ids  = chunk.loc[_nat_mask.any(axis=1), "id"].tolist()[:10]
             logger.error("STRING 'NaT' tuż przed UPSERT; kolumny=%s; id=%s", _bad_cols, _bad_ids)
 
-            records = chunk.to_dict(orient="records")
-            stmt = insert(t_main).values(records)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=conflict_key,
-                set_={col: getattr(stmt.excluded, col) for col in update_cols}
-            )
-            conn.execute(stmt)
+            with engine.begin() as conn:
+                for start in range(0, len(df_norm), CHUNK_SIZE):
+                    chunk = df_norm.iloc[start:start + CHUNK_SIZE][use_cols]
+                    chunk = _sanitize_df_for_sql(chunk, dt_cols_upsert)
+
+                    records = chunk.to_dict(orient="records")
+                    if not records:
+                        continue  # nic do wstawienia
+
+                    stmt = insert(t_main).values(records)
+
+                    # kolumny do update — pomijamy klucz conflict
+                    update_cols = [c for c in use_cols if c not in conflict_key]
+
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=conflict_key,  # <<< tutaj ON CONFLICT (id)
+                        set_={col: getattr(stmt.excluded, col) for col in update_cols}
+                    )
+
+                    logger.debug("UPSERT SQL: %s", str(stmt.compile(engine, compile_kwargs={'literal_binds': True})))
+
+                    conn.execute(stmt)
             mask_nat_str = chunk.applymap(lambda v: isinstance(v, str) and v.strip().lower()=="nat")
             if mask_nat_str.values.any():
                 bad_cols = [c for c in chunk.columns if mask_nat_str[c].any()]
@@ -550,13 +567,13 @@ def wczytaj_plik():
         )).scalar_one()
         logger.info("Wiersze z ustawionym relation_status: %s", nonnull_rel)
 
-        sample = con.execute(text(
-            "SELECT id, status, relation_status "
-            "FROM merchanci "
-            "ORDER BY data_aktualizacji DESC NULLS LAST, id "
-            "LIMIT 5"
-        )).mappings().all()
-        logger.info("Próbka po UPSERCIE: %s", [dict(r) for r in sample])
+        ssample = con.execute(text(
+        "SELECT id, status, relation_status "
+        "FROM merchanci "
+        "ORDER BY id DESC "
+        "LIMIT 5"
+    )).mappings().all()
+        logger.info("Próbka po UPSERCIE: %s", [dict(r) for r in ssample])
 
     elapsed = time.perf_counter() - t0
     logger.info("KONIEC: %.2f s (wierszy wejściowych: %d)", elapsed, len(df))
@@ -602,7 +619,7 @@ SELECT
   r.relation_status
 FROM ranked r
 WHERE r.rn = 1
-ON CONFLICT (nip) DO NOTHING ;
+ON CONFLICT (id) DO NOTHING ;
 """)
 
     with engine.begin() as con:
