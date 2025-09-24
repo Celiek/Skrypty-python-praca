@@ -310,28 +310,28 @@ def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
             result[str(row["nip"])] = row["status"]
     return result
 
-def fetch_emails(nipy) -> pd.DataFrame:
-    """Zwraca DF kolumny: nip, email (dla listy NIP-ów)."""
-    if isinstance(nipy, pd.Series):
-        nipy = nipy.dropna().astype(str).str.strip().unique().tolist()
-    elif isinstance(nipy, pd.DataFrame):
-        nipy = nipy["NIP"].dropna().astype(str).str.strip().unique().tolist()
-    elif isinstance(nipy, (list, tuple)):
-        nipy = [str(n).strip() for n in nipy if n]
-    else:
-        nipy = [str(nipy).strip()]
-
-    if not nipy:
-        print("Nie dosłałeś żadnych emaili !" + nipy)
-        return pd.DataFrame(columns=["nip", "email"])
-
-    query = "SELECT nip, email FROM merchanci WHERE nip = ANY(%s::bigint[])"
-    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query, (nipy,))
-        rows = cur.fetchall()
-    print("Emaile z bazy danych:")
-    print(rows)
-    return pd.DataFrame(rows)
+# def fetch_emails(nipy) -> pd.DataFrame:
+#     """Zwraca DF kolumny: nip, email (dla listy NIP-ów)."""
+#     if isinstance(nipy, pd.Series):
+#         nipy = nipy.dropna().astype(str).str.strip().unique().tolist()
+#     elif isinstance(nipy, pd.DataFrame):
+#         nipy = nipy["NIP"].dropna().astype(str).str.strip().unique().tolist()
+#     elif isinstance(nipy, (list, tuple)):
+#         nipy = [str(n).strip() for n in nipy if n]
+#     else:
+#         nipy = [str(nipy).strip()]
+#
+#     if not nipy:
+#         print("Nie dosłałeś żadnych emaili !" + nipy)
+#         return pd.DataFrame(columns=["nip", "email"])
+#
+#     query = "SELECT nip, email FROM merchanci WHERE nip = ANY(%s::bigint[])"
+#     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+#         cur.execute(query, (nipy,))
+#         rows = cur.fetchall()
+#     print("Emaile z bazy danych:")
+#     print(rows)
+#     return pd.DataFrame(rows)
 
 def build_recipients_report_only(df, recipients_df, mail_results, attachments_by_nip, output_file):
     # 1) Oczyść NIP wszędzie do samych cyfr
@@ -429,17 +429,13 @@ def lista_faktur_sm3() -> List[dict]:
     data = r.json()
     return [f for f in data if str(f.get("number", "")).endswith("/sm3")]
 
-def build_invoice_rows(df: pd.DataFrame) -> List[Dict]:
+def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] = None) -> List[Dict]:
     """
     Przygotowuje rekordy do wystawienia faktur:
     - agreguje po NIP (Netto sum, Kontrahent first),
     - liczona stawka 3% netto i brutto (VAT 23%),
-    - dociąga email z DB.
-    Zwraca listę dict: {buyer_name, buyer_tax_no, buyer_email, amount_gross}
+    - email bierze z recipients_df (jeśli podane).
     """
-    # jak się spartoli to wywalić to
-    #df["NIP"] = _norm_doc_no(df["NIP"])
-
     grouped = (
         df.groupby("NIP", as_index=False)
           .agg({"Netto": "sum", "Kontrahent": "first"})
@@ -447,20 +443,22 @@ def build_invoice_rows(df: pd.DataFrame) -> List[Dict]:
     grouped["stawka_netto_3p"]  = grouped["Netto"] * 0.03
     grouped["stawka_brutto_3p"] = grouped["stawka_netto_3p"] * 1.23
 
-    emails_df = fetch_emails(grouped["NIP"])
-    emails_df["nip"] = emails_df["nip"].astype(str)
-    grouped["NIP"]   = grouped["NIP"].astype(str)
-    merged = grouped.merge(emails_df, left_on="NIP", right_on="nip", how="left")
-
     rows = []
-    for _, r in merged.iterrows():
+    for _, r in grouped.iterrows():
+        email = None
+        if recipients_df is not None:
+            rec = recipients_df.loc[recipients_df["nip"] == str(r["NIP"])]
+            if not rec.empty:
+                email = rec["email"].iloc[0]
+
         rows.append({
             "buyer_name":   str(r["Kontrahent"]).strip(),
             "buyer_tax_no": str(r["NIP"]).strip(),
-            "buyer_email":  (str(r["email"]).strip() if pd.notna(r.get("email")) else None),
+            "buyer_email":  email,
             "amount_gross": _money2(r["stawka_brutto_3p"]),
         })
     return rows
+
 
 def get_invoice_public_url(invoice_id: int, api_key: str) -> Optional[str]:
     """
@@ -589,49 +587,30 @@ def build_recipients_send_only(df: pd.DataFrame,
                                attachments_by_nip: Dict[str, str]) -> pd.DataFrame:
     """
     Zwraca DF z kolumnami: nip, email, kontrahent, link, attachment_path
-    - email/link: z listy odbiorców jeśli podana; inaczej email z DB (fetch_emails), link pusty
+    - scalając dane z pliku faktur (df) i pliku recipients (NIP,email,...).
     """
-    # agregacja po NIP jak w build_invoice_rows – tylko dla nazwy
-    base = (df.groupby("NIP", as_index=False)
-              .agg({"Kontrahent": "first"}))
-    base["NIP"] = base["NIP"].astype(str)
+    if recipients_list is None or recipients_list.empty:
+        raise ValueError("Brak pliku recipients – nie ma skąd wziąć maili!")
 
-    base["NIP"] = base["NIP"].apply(nip_digits)
+    rl = recipients_list.copy()
+    rl["nip_clean"] = rl["nip"].astype(str).apply(_only_digits)
 
-    # maile: albo z listy, albo z bazy
-    if recipients_list is not None and not recipients_list.empty:
-        rl = recipients_list.copy()
-        rl["nip"] = rl["nip"].astype(str)
-        merged = base.merge(rl, left_on="NIP", right_on="nip", how="left")
-        # fallback – jeśli w liście brak emaila, dociągnij z DB
-        need = merged["email"].isna() | (merged["email"].astype(str).str.strip() == "")
-        if need.any():
-            emails_db = fetch_emails(merged.loc[need, "NIP"])
-            emails_db["nip"] = emails_db["nip"].astype(str)
-            merged = merged.merge(emails_db, left_on="NIP", right_on="nip", how="left", suffixes=("", "_db"))
-            merged["email"] = merged["email"].fillna(merged["email_db"])
-        merged["link"] = merged["link"].fillna("")
-        out = pd.DataFrame({
-            "nip": merged["NIP"].astype(str),
-            "email": merged["email"].astype(str),
-            "kontrahent": merged["Kontrahent"].astype(str),
-            "link": merged["link"].astype(str),
-        })
-    else:
-        emails_db = fetch_emails(base["NIP"])
-        emails_db["nip"] = emails_db["nip"].astype(str)
-        merged = base.merge(emails_db, left_on="NIP", right_on="nip", how="left")
-        out = pd.DataFrame({
-            "nip": merged["NIP"].astype(str),
-            "email": merged["email"].astype(str),
-            "kontrahent": merged["Kontrahent"].astype(str),
-            "link": pd.Series([""]*len(merged))
-        })
+    base = df.copy()
+    base["nip_clean"] = base["NIP"].astype(str).apply(_only_digits)
+
+    merged = base.merge(rl, on="nip_clean", how="inner")
+
+    out = pd.DataFrame({
+        "nip": merged["nip_clean"].astype(str),
+        "email": merged["email"].astype(str),
+        "kontrahent": merged["Kontrahent_x"].astype(str) if "Kontrahent_x" in merged else merged.get("kontrahent",""),
+        "link": merged.get("link", pd.Series([""]*len(merged))).astype(str),
+    })
 
     out["attachment_path"] = out["nip"].map(attachments_by_nip).fillna("")
-    # filtrowanie: tylko z mailem
     out = out[out["email"].str.contains(r"@")]
     return out
+
 
 
 def dodaj_faktury(spolka: str, items: List[Dict]) -> List[Dict]:
@@ -748,15 +727,14 @@ def czytaj_plik(
     spolka: str,
     key: str,
     output_file: Optional[str] = None,
-    send_only: bool = False,                 # NEW
-    recipients_file: Optional[str] = None,   # NEW
-    dry_run: bool = False,                   # NEW
+    send_only: bool = False,
+    recipients_file: Optional[str] = None,
+    dry_run: bool = False,
 ) -> Optional[pd.DataFrame]:
-
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     att_dir = os.path.join(OUTPUT_DIR, f"zalaczniki_{ts}")
 
-    # 1) wczytanie głównego pliku
+    # 1) wczytanie głównego pliku (faktury)
     df = pd.read_excel(file)
     if df is None or df.empty:
         raise ValueError("Pusty DataFrame – sprawdź plik wejściowy.")
@@ -767,7 +745,7 @@ def czytaj_plik(
     attachments_by_nip = export_grouped_csvs(df, att_dir, encoding=OUTPUT_ENCODING)
     attachments_by_nip = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
 
-    # 2) czyszczenia
+    # 2) czyszczenie danych
     df = df.replace("", pd.NA)
     df = handle_duplicates(df, action="warn")
 
@@ -792,35 +770,34 @@ def czytaj_plik(
         logging.info("[INFO] Po filtracjach brak wierszy.")
         return df
 
-    # 3) ŚCIEŻKA A: SEND-ONLY (bez Fakturowni)
-    if send_only:
-        # 3.1 wczytaj listę kontrahentów (jeśli podano)
-        rec_list = read_recipients_list(recipients_file) if recipients_file else None
-        rec_list.columns =rec_list.columns.str.strip()
-        rec_list["nip"] = rec_list["nip"].apply(nip_digits)
+    # 3) wczytaj recipients (jeśli jest)
+    rec_list = read_recipients_list(recipients_file) if recipients_file else None
+    if rec_list is not None and not rec_list.empty:
+        rec_list["nip_clean"] = rec_list["nip"].apply(_only_digits)
+        df["nip_clean"] = df["NIP"].apply(_only_digits)
+    else:
+        rec_list = pd.DataFrame(columns=["nip","email","link","kontrahent","nip_clean"])
+        df["nip_clean"] = df["NIP"].apply(_only_digits)
 
-        # 3.2 zbuduj listę odbiorców do wysyłki (TU MUSI BYĆ SEND_ONLY)
+    # 4) TRYB SEND-ONLY
+    if send_only:
         recipients_df = build_recipients_send_only(df, rec_list, attachments_by_nip)
         logging.info("[SEND-ONLY] Odbiorców: %d", len(recipients_df))
 
-        # 3.3 wyślij maile
         mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
         mail_ok = sum(1 for r in mail_results if r.get("ok"))
         mail_bad = len(mail_results) - mail_ok
         logging.info("[MAIL] OK: %d, BŁĘDY: %d", mail_ok, mail_bad)
 
-        # 3.4 sumy z pliku źródłowego (cały plik)
-        suma_netto = float(df["Netto"].sum())
-        suma_vat = float(df["VAT"].sum())
-        suma_brutto = float(df["Brutto"].sum())
+        # podsumowanie
         summary = {
             "ok": mail_ok,
             "bledy": mail_bad,
             "razem_wiadomosci": len(mail_results),
-            "suma_netto": suma_netto,
-            "suma_vat": suma_vat,
-            "suma_brutto": suma_brutto,
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "suma_netto": float(df["Netto"].sum()),
+            "suma_vat": float(df["VAT"].sum()),
+            "suma_brutto": float(df["Brutto"].sum()),
+            "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         if output_file:
@@ -828,16 +805,9 @@ def czytaj_plik(
             if not ext:
                 ext = ".csv"
 
-            # 3.5 raport zbiorczy
-            summary_path = f"{base}_raport{ext}"
-            pd.DataFrame([summary]).to_csv(summary_path, index=False, encoding=OUTPUT_ENCODING)
-            logging.info("[SAVE] Raport zbiorczy: %s", summary_path)
+            pd.DataFrame([summary]).to_csv(f"{base}_raport{ext}", index=False, encoding=OUTPUT_ENCODING)
+            logging.info("[SAVE] Raport zbiorczy: %s", f"{base}_raport{ext}")
 
-            # 3.6 normalizacja NIP (same cyfry) po obu stronach
-            df["NIP"] = df["NIP"].astype(str).str.replace(r"\D", "", regex=True)
-            recipients_df["nip"] = recipients_df["nip"].astype(str).str.replace(r"\D", "", regex=True)
-
-            # 3.7 raport **tylko dla recipients** (per NIP)
             raport_recipients, _ = build_recipients_report_only(
                 df=df,
                 recipients_df=recipients_df,
@@ -846,26 +816,13 @@ def czytaj_plik(
                 output_file=f"{base}_recipients{ext}"
             )
 
-            # (opcjonalne) dopięcie statusu wysyłki po e-mailu – jeśli chcesz mieć go też w raporcie:
-            mail_df = pd.DataFrame(mail_results).rename(columns={"email": "Email", "ok": "Wyslano_OK"})
-            if "Email" in raport_recipients.columns:
-                raport_recipients = raport_recipients.merge(
-                    mail_df[["Email", "Wyslano_OK"]],
-                    on="Email",
-                    how="left"
-                )
-                raport_recipients.to_csv(f"{base}_recipients{ext}", index=False, encoding=OUTPUT_ENCODING, sep=";")
-
-            # 3.8 zapisz surową listę odbiorców (to co realnie wysyłaliśmy)
             recipients_df.to_csv(output_file, index=False, encoding=OUTPUT_ENCODING)
             logging.info("[SAVE] Zapisano raport odbiorców (surowy): %s", output_file)
 
         return df
 
-        return df
-
-    # 4) ŚCIEŻKA B: standard – wystaw faktury i wyślij linki
-    rows = build_invoice_rows(df)
+    # 5) TRYB STANDARDOWY (Fakturownia)
+    rows = build_invoice_rows(df, rec_list)   # <== PRZEKAZUJĘ rec_list żeby dołączyć email
     logging.info("[INFO] Do wystawienia faktur: %d rekordów.", len(rows))
 
     wyniki = dodaj_faktury(spolka, rows)
@@ -876,36 +833,34 @@ def czytaj_plik(
         if not w["ok"]:
             logging.error("   NIP=%s → %s", w["nip"], w.get("error"))
 
+    # scal odbiorców z wynikami fakturowni
     recipients_df = prepare_recipients(rows, wyniki, attachments_by_nip)
     mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
     mail_ok = sum(1 for r in mail_results if r.get("ok"))
     mail_bad = len(mail_results) - mail_ok
     logging.info("[MAIL] OK: %d, BŁĘDY: %d", mail_ok, mail_bad)
 
-    suma_netto = df["Netto"].sum()
-    suma_vat = df["VAT"].sum()
-    suma_brutto = df["Brutto"].sum()
-
+    # podsumowanie
     summary = {
         "ok": mail_ok,
         "bledy": mail_bad,
         "razem_wiadomosci": len(mail_results),
-        "suma_netto": float(suma_netto),
-        "suma_vat": float(suma_vat),
-        "suma_brutto": float(suma_brutto),
-        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "suma_netto": float(df["Netto"].sum()),
+        "suma_vat": float(df["VAT"].sum()),
+        "suma_brutto": float(df["Brutto"].sum()),
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
     if output_file:
         base, ext = os.path.splitext(output_file)
-        summary_path = f"{base}_raport{ext}"
-        pd.DataFrame([summary]).to_csv(summary_path, index=False, encoding=OUTPUT_ENCODING)
-        logging.info("[SAVE] Raport zbiorczy: %s", summary_path)
+        pd.DataFrame([summary]).to_csv(f"{base}_raport{ext}", index=False, encoding=OUTPUT_ENCODING)
+        logging.info("[SAVE] Raport zbiorczy: %s", f"{base}_raport{ext}")
 
         pd.DataFrame(wyniki).to_csv(output_file, index=False, encoding=OUTPUT_ENCODING)
         logging.info("[SAVE] Zapisano raport: %s", output_file)
 
     return df
+
 
 
 # =========================
