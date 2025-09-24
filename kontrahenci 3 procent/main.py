@@ -85,16 +85,16 @@ EMAIL_HTML_TEMPLATE ="""
       <td align="center" style="padding:10px;">
         <!-- Social icons -->
         <a href="https://facebook.com/TwojaStrona" target="_blank" style="margin:0 5px;">
-          <img src="https://cdn.supermerchant.pl/icons/facebook.png" alt="Facebook" width="32" border="0" style="display:inline-block;">
+          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-4.png" alt="Facebook" width="32" border="0" style="display:inline-block;">
         </a>
         <a href="https://twitter.com/" target="_blank" style="margin:0 5px;">
-          <img src="https://cdn.supermerchant.pl/icons/twitter.png" alt="Twitter" width="32" border="0" style="display:inline-block;">
+          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-5.png" alt="Twitter" width="32" border="0" style="display:inline-block;">
         </a>
         <a href="https://linkedin.com/" target="_blank" style="margin:0 5px;">
-          <img src="https://cdn.supermerchant.pl/icons/linkedin.png" alt="LinkedIn" width="32" border="0" style="display:inline-block;">
+          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-6.png" alt="LinkedIn" width="32" border="0" style="display:inline-block;">
         </a>
         <a href="https://instagram.com/" target="_blank" style="margin:0 5px;">
-          <img src="https://cdn.supermerchant.pl/icons/instagram.png" alt="Instagram" width="32" border="0" style="display:inline-block;">
+          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-7.png" alt="Instagram" width="32" border="0" style="display:inline-block;">
         </a>
       </td>
     </tr>
@@ -322,12 +322,15 @@ def fetch_emails(nipy) -> pd.DataFrame:
         nipy = [str(nipy).strip()]
 
     if not nipy:
+        print("Nie dosłałeś żadnych emaili !" + nipy)
         return pd.DataFrame(columns=["nip", "email"])
 
     query = "SELECT nip, email FROM merchanci WHERE nip = ANY(%s::bigint[])"
     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(query, (nipy,))
         rows = cur.fetchall()
+    print("Emaile z bazy danych:")
+    print(rows)
     return pd.DataFrame(rows)
 
 def build_recipients_report_only(df, recipients_df, mail_results, attachments_by_nip, output_file):
@@ -434,6 +437,9 @@ def build_invoice_rows(df: pd.DataFrame) -> List[Dict]:
     - dociąga email z DB.
     Zwraca listę dict: {buyer_name, buyer_tax_no, buyer_email, amount_gross}
     """
+    # jak się spartoli to wywalić to
+    #df["NIP"] = _norm_doc_no(df["NIP"])
+
     grouped = (
         df.groupby("NIP", as_index=False)
           .agg({"Netto": "sum", "Kontrahent": "first"})
@@ -494,6 +500,7 @@ def send_Email(spolka: str,
     use_ssl = os.getenv("SMTP_USE_SSL", "1") == "1"
     #use_ssl = False
 
+
     company_name = cfg.get("name") or spolka.upper()
     if not subject:
         subject = f"{company_name} - faktura"
@@ -510,15 +517,20 @@ def send_Email(spolka: str,
     try:
         if use_ssl:
             server = smtplib.SMTP_SSL(host=host, port=port, context=context, timeout = 60)
+            if os.getenv("SMTP_DEBUG", "0") == "1":
+                server.set_debuglevel(1)
+            server.ehlo()
         else:
             server = smtplib.SMTP(host=host, port=port, timeout=60)
             server.ehlo()
             # odkomentować po debugowaniu
             server.starttls(context=context)
             server.ehlo()
+
         # zakomentowane na rzecz debugowania
         if from_addr and password:
             server.login(from_addr, password)
+            server.ehlo()
 
         for row in recipents_df.itertuples(index = False):
             email_to = (getattr(row, "email", None) or "").strip()
@@ -528,6 +540,8 @@ def send_Email(spolka: str,
 
             if not email_to:
                 results.append({"email": None, "ok": False, "error": "Brak adresu email"})
+                logging.warning("[SKIP] %s pominięty – %s", email_to or "-",
+                                "brak adresu" if not email_to else "brak linku")
                 continue
             if not invoice_link:
                 results.append({"email": email_to, "ok": False, "error": "Brak linku do faktury"})
@@ -566,6 +580,8 @@ def send_Email(spolka: str,
             except Exception:
                 pass
 
+    pd.DataFrame(results).to_csv("mail_debug.csv", index=False, sep=";", encoding="utf-8-sig")
+    logging.info("[DEBUG] Zapisano szczegóły maili do mail_debug.csv")
     return results
 
 def build_recipients_send_only(df: pd.DataFrame,
@@ -579,6 +595,8 @@ def build_recipients_send_only(df: pd.DataFrame,
     base = (df.groupby("NIP", as_index=False)
               .agg({"Kontrahent": "first"}))
     base["NIP"] = base["NIP"].astype(str)
+
+    base["NIP"] = base["NIP"].apply(nip_digits)
 
     # maile: albo z listy, albo z bazy
     if recipients_list is not None and not recipients_list.empty:
@@ -743,10 +761,13 @@ def czytaj_plik(
     if df is None or df.empty:
         raise ValueError("Pusty DataFrame – sprawdź plik wejściowy.")
 
+    df["NIP"] = df["NIP"].astype(str).map(_only_digits)
+
     # załączniki CSV per NIP
     attachments_by_nip = export_grouped_csvs(df, att_dir, encoding=OUTPUT_ENCODING)
+    attachments_by_nip = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
 
-    # 2) czyszczenia…
+    # 2) czyszczenia
     df = df.replace("", pd.NA)
     df = handle_duplicates(df, action="warn")
 
@@ -756,16 +777,6 @@ def czytaj_plik(
         df.loc[mask_empty_nip].to_csv(out, index=False, encoding=OUTPUT_ENCODING)
         logging.warning("[WARN] Pominięto %d wierszy z pustym NIP-em → %s", int(mask_empty_nip.sum()), out)
     df = df.loc[~mask_empty_nip].copy()
-
-    df["NIP"] = df["NIP"].apply(nip_digits)
-
-    # sprawdzanie pliku pod kątem wartości 0
-    # mask_negative = (df["Netto"] <= 0) | (df["VAT"] <= 0) | (df["Brutto"] <= 0)
-    # if mask_negative.any():
-    #     out = os.path.join(OUTPUT_DIR, f"ujemne_{ts}.csv")
-    #     df.loc[mask_negative].to_csv(out, index=False, encoding=OUTPUT_ENCODING)
-    #     logging.warning("[WARN] Pominięto %d wierszy z ujemnymi kwotami → %s", int(mask_negative.sum()), out)
-    # df = df.loc[~mask_negative].copy()
 
     status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
     mask_prem = df["NIP"].astype(str).apply(
@@ -785,6 +796,8 @@ def czytaj_plik(
     if send_only:
         # 3.1 wczytaj listę kontrahentów (jeśli podano)
         rec_list = read_recipients_list(recipients_file) if recipients_file else None
+        rec_list.columns =rec_list.columns.str.strip()
+        rec_list["nip"] = rec_list["nip"].apply(nip_digits)
 
         # 3.2 zbuduj listę odbiorców do wysyłki (TU MUSI BYĆ SEND_ONLY)
         recipients_df = build_recipients_send_only(df, rec_list, attachments_by_nip)
