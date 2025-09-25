@@ -517,46 +517,37 @@ def send_Email(spolka: str,
 
     try:
         if use_ssl:
-            server = smtplib.SMTP_SSL(host=host, port=port, context=context, timeout = 60)
-            if os.getenv("SMTP_DEBUG", "0") == "1":
-                server.set_debuglevel(1)
-            # server.ehlo()
+            server = smtplib.SMTP_SSL(host=host, port=port, context=context, timeout=60)
+            server.ehlo()
         else:
             server = smtplib.SMTP(host=host, port=port, timeout=60)
-            # server.ehlo()
-            # odkomentować po debugowaniu
+            server.ehlo()
             server.starttls(context=context)
-            # server.ehlo()
-
-        # zakomentowane na rzecz debugowania
-        if from_addr and password:
-            server.login(from_addr, password)
             server.ehlo()
 
-        for row in recipents_df.itertuples(index = False):
+        if os.getenv("SMTP_DEBUG", "0") == "1":
+            server.set_debuglevel(1)
+
+        if from_addr and password:
+            server.login(from_addr, password)
+
+        for row in recipents_df.itertuples(index=False):
             email_to = (getattr(row, "email", None) or "").strip()
             invoice_link = (getattr(row, "link", None) or getattr(row, "invoice_link", None) or "").strip()
             kontrahent = (getattr(row, "kontrahent", "") or "").strip()
-            # attach_path = (getattr(row, "attachment_path", "") or "").strip()
-            paths = []
-
-            ap_list = getattr(row, "attachment_paths", None)
-            if isinstance(ap_list, list):
-                paths.extend([p for p in ap_list if p])
-
-            
 
             if not email_to:
                 results.append({"email": None, "ok": False, "error": "Brak adresu email"})
-                logging.warning("[SKIP] %s pominięty – %s", email_to or "-",
-                                "brak adresu" if not email_to else "brak linku")
+                logging.warning("[SKIP] %s pominięty – brak adresu", email_to or "-")
                 continue
             if not invoice_link:
                 results.append({"email": email_to, "ok": False, "error": "Brak linku do faktury"})
+                logging.warning("[SKIP] %s pominięty – brak linku do faktury", email_to)
                 continue
 
+            # 1) Złóż wiadomość (root = mixed)
             html_body = render_email_html(invoice_link, company_name)
-            msg = MIMEMultipart("alternative")
+            msg = MIMEMultipart()  # mixed
             msg["Subject"] = subject
             msg["From"] = from_addr
             msg["To"] = email_to
@@ -565,15 +556,34 @@ def send_Email(spolka: str,
             alt.attach(MIMEText(html_body, "html", "utf-8"))
             msg.attach(alt)
 
-            # ZAŁĄCZNIK (jeśli jest)
-            if attach_path and os.path.isfile(attach_path):
-                with open(attach_path, "rb") as f:
+            # 2) Zbierz ścieżki załączników (lista, pojedynczy, ewentualnie string rozdzielany ';')
+            paths = []
+            ap_list = getattr(row, "attachment_paths", None)
+            if isinstance(ap_list, list):
+                paths.extend([p for p in ap_list if p])
+
+            ap_single = (getattr(row, "attachment_path", "") or "").strip()
+            if ap_single:
+                paths.append(ap_single)
+
+            ap_strlist = getattr(row, "attachment_paths_str", None)
+            if isinstance(ap_strlist, str) and ap_strlist.strip():
+                paths.extend([p.strip() for p in ap_strlist.split(";") if p.strip()])
+
+            # 3) Dołącz wszystkie istniejące pliki
+            for p in paths:
+                if not p:
+                    continue
+                if not os.path.isfile(p):
+                    logging.warning("[MAIL] Załącznik nie istnieje: %s", p)
+                    continue
+                with open(p, "rb") as f:
                     part = MIMEApplication(f.read())
-                # ładna nazwa pliku
-                filename = os.path.basename(attach_path)
+                filename = os.path.basename(p)
                 part.add_header("Content-Disposition", "attachment", filename=filename)
                 msg.attach(part)
 
+            # 4) Wyślij
             try:
                 server.sendmail(from_addr, [email_to], msg.as_string())
                 logging.info("[MAIL] OK -> %s (kontrahent: %s)", email_to, kontrahent or "-")
@@ -588,8 +598,12 @@ def send_Email(spolka: str,
             except Exception:
                 pass
 
-    pd.DataFrame(results).to_csv("mail_debug.csv", index=False, sep=";", encoding="utf-8-sig")
-    logging.info("[DEBUG] Zapisano szczegóły maili do mail_debug.csv")
+    try:
+        pd.DataFrame(results).to_csv("mail_debug.csv", index=False, sep=";", encoding="utf-8-sig")
+        logging.info("[DEBUG] Zapisano szczegóły maili do mail_debug.csv")
+    except Exception as e:
+        logging.warning("[DEBUG] Nie udało się zapisać mail_debug.csv: %s", e)
+
     return results
 
 def build_recipients_send_only(df: pd.DataFrame,
@@ -609,12 +623,16 @@ def build_recipients_send_only(df: pd.DataFrame,
     base["nip_clean"] = base["NIP"].astype(str).apply(_only_digits)
 
     merged = base.merge(rl, on="nip_clean", how="inner")
+    kontrahent_col = "Kontrahent" if "Kontrahent" in merged.columns else (
+        "kontrahent" if "kontrahent" in merged.columns else None)
 
     out = pd.DataFrame({
         "nip": merged["nip_clean"].astype(str),
         "email": merged["email"].astype(str),
-        "kontrahent": merged["Kontrahent_x"].astype(str) if "Kontrahent_x" in merged else merged.get("kontrahent",""),
-        "link": merged.get("link", pd.Series([""]*len(merged))).astype(str),
+        "kontrahent": merged[kontrahent_col].astype(str) if kontrahent_col else "",
+        "link": (
+            merged["link"] if "link" in merged.columns else pd.Series([""] * len(merged), index=merged.index)).astype(
+            str),
     })
 
     out["attachment_path"] = out["nip"].map(attachments_by_nip).fillna("")
@@ -654,7 +672,7 @@ def dodaj_faktury(spolka: str, items: List[Dict]) -> List[Dict]:
                     "department_id": DEPARTMENT_ID[spolka],
                     **({"buyer_email": it["buyer_email"]} if it.get("buyer_email") else {}),
                     "positions": [{
-                        "name": f"płatność za usługę za okres {miesiace[poprzedni.month]}",
+                        "name": f"płatność za usługę za okres {miesiace[poprzedni.month]} {today.year}",
                         "tax": 23,
                         "total_price_gross": it["amount_gross"],
                         "quantity": 1
@@ -771,7 +789,7 @@ def get_faktur():
     # for f in filtered[:5]:
     #     print(f)
 
-    print(f"[INFO] łącznie pobrano {len(invoices_sm3)} faktur pobranych dzisiaj :")
+    print(f"[INFO] łącznie pobrano {len(invoices_sm3)} faktur wygenerowanych dzisiaj :")
 
     out_dir = os.path.join("faktury", date.today().isoformat())
     os.makedirs(out_dir, exist_ok=True)
@@ -786,7 +804,7 @@ def get_faktur():
             pobrane_faktury.append({"id": None, "path": None, "ok": False, "error": "Brak id faktury","buyer_tax_no": nip})
             continue
 
-        filename = _safe_name(str(nip)) + ".pdf"
+        filename = _safe_name(f"{nip}_{number}") + ".pdf"
         out_path = os.path.join(out_dir,filename)
         if os.path.exists(out_path):
             out_path = os.path.join(out_dir, f"{_safe_name(str(number))}_{inv_id}.pdf")
@@ -809,7 +827,7 @@ def get_faktur():
 
     # Debug ONLY
     # print(filtered)
-    return filtered
+    return filtered, pobrane_faktury
 
 def get_spolka_config(spolka: str) -> dict:
     klucz = spolka.strip().lower()
@@ -906,6 +924,11 @@ def czytaj_plik(
     # print("dane z dataframea")
     # print(df)
 
+    # get_faktur()
+    # filtered, pobrane_faktury = get_faktur()
+    # pdf_map = build_pdf_map(pobrane_faktury)
+    # all_attach_map = combine_attachments(attachments_by_nip, pdf_map)
+
     # 3) wczytaj plik odbiorcy (jeśli jest)
     rec_list = read_recipients_list(recipients_file) if recipients_file else None
     if rec_list is not None and not rec_list.empty:
@@ -975,12 +998,20 @@ def czytaj_plik(
             logging.error("   NIP=%s → %s", w["nip"], w.get("error"))
 
     # scal odbiorców z wynikami fakturowni
+
+    filtered, pobrane_faktury = get_faktur()
+    pdf_map = build_pdf_map(pobrane_faktury)
+    all_attach_map = combine_attachments(attachments_by_nip, pdf_map)
+
     recipients_df = prepare_recipients(rows, wyniki, attachments_by_nip)
+    recipients_df["attachment_paths"] = recipients_df["nip"].map(all_attach_map)
     mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
+
+
     mail_ok = sum(1 for r in mail_results if r.get("ok"))
     mail_bad = len(mail_results) - mail_ok
     logging.info("[MAIL] OK: %d, BŁĘDY: %d", mail_ok, mail_bad)
-    get_faktur()
+
 
     # podsumowanie
     summary = {
