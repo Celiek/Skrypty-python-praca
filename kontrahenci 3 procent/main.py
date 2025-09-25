@@ -21,6 +21,9 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 
+
+#dodać logowanie duplikatów
+
 # =========================
 # Konfiguracja / stałe
 # =========================
@@ -30,8 +33,7 @@ API_KEY = os.getenv("API_KEY")
 OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "utf-8-sig")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", ".")
 
-EMAIL_HTML_TEMPLATE ="""
-       <!DOCTYPE html>
+EMAIL_HTML_TEMPLATE =""" <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
@@ -59,7 +61,7 @@ EMAIL_HTML_TEMPLATE ="""
       <td align="center" style="padding:0 20px 20px; font-size:14px; line-height:20px; color:#333333;">
         Poprzedni okres rozliczeniowy dobiegł końca,<br>
         poniżej znajdziesz link do pobrania faktury 3% za sprzedane artykuły,<br>
-        a w załączniku listę faktur, na podstawie których została ona wystawiona.
+        a w załączniku listę faktur na podstawie których została wystawiona.
       </td>
     </tr>
     <tr>
@@ -81,29 +83,10 @@ EMAIL_HTML_TEMPLATE ="""
         </a>
       </td>
     </tr>
-    <tr>
-      <td align="center" style="padding:10px;">
-        <!-- Social icons -->
-        <a href="https://facebook.com/TwojaStrona" target="_blank" style="margin:0 5px;">
-          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-4.png" alt="Facebook" width="32" border="0" style="display:inline-block;">
-        </a>
-        <a href="https://twitter.com/" target="_blank" style="margin:0 5px;">
-          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-5.png" alt="Twitter" width="32" border="0" style="display:inline-block;">
-        </a>
-        <a href="https://linkedin.com/" target="_blank" style="margin:0 5px;">
-          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-6.png" alt="LinkedIn" width="32" border="0" style="display:inline-block;">
-        </a>
-        <a href="https://instagram.com/" target="_blank" style="margin:0 5px;">
-          <img src="https://raw.githubusercontent.com/Celiek/Skrypty-python-praca/refs/heads/main/img/image-7.png" alt="Instagram" width="32" border="0" style="display:inline-block;">
-        </a>
-      </td>
-    </tr>
   </table>
 
 </body>
-</html>
-
-    """
+</html>"""
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -891,6 +874,9 @@ def czytaj_plik(
         raise ValueError("Pusty DataFrame – sprawdź plik wejściowy.")
 
     df["NIP"] = df["NIP"].astype(str).map(_only_digits)
+
+    # print("Lista nipów z pliku z fakturami")
+    # print(df["NIP"])
 
     # załączniki CSV per NIP
     attachments_by_nip = export_grouped_csvs(df, att_dir, encoding=OUTPUT_ENCODING)
