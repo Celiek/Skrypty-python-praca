@@ -8,7 +8,7 @@ from pathlib import Path
 
 import unicodedata
 from argparse import ArgumentParser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from decimal import Decimal, ROUND_HALF_UP
@@ -269,6 +269,9 @@ def prepare_recipients(rows_from_build: List[Dict], wyniki_faktur: List[Dict], a
 
     # dołącz ścieżkę do CSV
     out["attachment_path"] = out["nip"].map(attachments_by_nip).fillna("")
+    #DEBUG ONLY
+    # print("odbiorcy lista:")
+    # print(out)
     return out
 
 def render_email_html(invoice_link: Optional[str], company_name: str) -> str:
@@ -517,13 +520,13 @@ def send_Email(spolka: str,
             server = smtplib.SMTP_SSL(host=host, port=port, context=context, timeout = 60)
             if os.getenv("SMTP_DEBUG", "0") == "1":
                 server.set_debuglevel(1)
-            server.ehlo()
+            # server.ehlo()
         else:
             server = smtplib.SMTP(host=host, port=port, timeout=60)
-            server.ehlo()
+            # server.ehlo()
             # odkomentować po debugowaniu
             server.starttls(context=context)
-            server.ehlo()
+            # server.ehlo()
 
         # zakomentowane na rzecz debugowania
         if from_addr and password:
@@ -534,7 +537,14 @@ def send_Email(spolka: str,
             email_to = (getattr(row, "email", None) or "").strip()
             invoice_link = (getattr(row, "link", None) or getattr(row, "invoice_link", None) or "").strip()
             kontrahent = (getattr(row, "kontrahent", "") or "").strip()
-            attach_path = (getattr(row, "attachment_path", "") or "").strip()
+            # attach_path = (getattr(row, "attachment_path", "") or "").strip()
+            paths = []
+
+            ap_list = getattr(row, "attachment_paths", None)
+            if isinstance(ap_list, list):
+                paths.extend([p for p in ap_list if p])
+
+            
 
             if not email_to:
                 results.append({"email": None, "ok": False, "error": "Brak adresu email"})
@@ -698,8 +708,108 @@ def read_recipients_list(path: str) -> pd.DataFrame:
     out = out[out["nip"].str.len() == 10]
     out = out[out["email"].str.contains(r"@")]
     out = out.drop_duplicates(subset=["nip"], keep="first")
+
+    # print("NIPY")
+    # print(df)
     return out
 
+# sanityzacja ciągów znaków
+# używana do generowania bezpiecznych nazw dla pdf-ów
+def _safe_name(name: str) -> str:
+    """Prosty sanitizator nazwy pliku."""
+    name = name.strip() or "plik"
+    # usuń znaki niedozwolone w Windows/Linux/Mac
+    name = re.sub(r'[<>:"/\\|?*]+', "_", name)
+    # uniknij kropek/spacji na końcu
+    return name.strip(" .")[:150]
+
+# kod do pobierania faktur w formie pdf z fakturowni
+# do wysyłania jako załącznik w emailach
+def get_faktur():
+    # dodać paginacje
+    lista_faktur = "https://shumee.fakturownia.pl/invoices.json"
+
+    # + id_faktury.pdf + ?api_token =
+    link_do_pobrania ="https://shumee.fakturownia.pl/invoices/{invoice_id}.pdf"
+
+    today = date.today().strftime("%Y-%m-%d")
+
+    all_invoices = []
+    page = 1
+    while True:
+        params = {
+            "api_token": os.getenv("API_KEY"),
+            "sell_date":today,
+            "page":page,
+            "per_page":100,
+            "period":"this_month"
+        }
+
+        r=requests.get(lista_faktur,params=params,timeout=60)
+        r.raise_for_status()
+        data = r.json()
+
+        if not data:
+            break
+        all_invoices.extend(data)
+
+        print(f"[INFO] Pobrana strona {page}, ogólnych rekordów{len(data)}")
+        page +=1
+
+    invoices_sm3 = [inv for inv in all_invoices if str(inv.get("number","")).endswith("sm3")]
+    invoices_sm3.sort(key=lambda x : x.get("number",""))
+
+    filtered = [{
+        "id": inv.get("id"),
+        "number": inv.get("number"),
+        "buyer_tax_no": inv.get("buyer_tax_no"),
+    }
+        for inv in invoices_sm3
+        if inv.get("sell_date") == today and str(inv.get('number', "")).endswith("sm3")
+    ]
+    # DEBUG ONLY
+    # for f in filtered[:5]:
+    #     print(f)
+
+    print(f"[INFO] łącznie pobrano {len(invoices_sm3)} faktur pobranych dzisiaj :")
+
+    out_dir = os.path.join("faktury", date.today().isoformat())
+    os.makedirs(out_dir, exist_ok=True)
+
+    pobrane_faktury = []
+    for inv in filtered:
+        inv_id = inv.get("id")
+        number = inv.get("number") or f"id_{inv_id}"
+        nip = inv.get("buyer_tax_no")
+
+        if not inv_id:
+            pobrane_faktury.append({"id": None, "path": None, "ok": False, "error": "Brak id faktury","buyer_tax_no": nip})
+            continue
+
+        filename = _safe_name(str(nip)) + ".pdf"
+        out_path = os.path.join(out_dir,filename)
+        if os.path.exists(out_path):
+            out_path = os.path.join(out_dir, f"{_safe_name(str(number))}_{inv_id}.pdf")
+
+        url = link_do_pobrania.format(invoice_id=inv_id)
+        params = {"api_token": os.getenv("API_KEY")}
+
+        try:
+            with requests.get(url, params=params, timeout=60, stream=True) as r:
+                r.raise_for_status()
+                with open(out_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            logging.info("[PDF] OK: %s → %s", number, out_path)
+            pobrane_faktury.append({"id": inv_id, "path": out_path, "ok": True, "error": None,"buyer_tax_no": nip, })
+        except Exception as e:
+            logging.error("[PDF] BŁĄD: %s → %s", number, e)
+            pobrane_faktury.append({"id": inv_id, "path": None, "ok": False, "error": str(e),"buyer_tax_no": nip, })
+
+    # Debug ONLY
+    # print(filtered)
+    return filtered
 
 def get_spolka_config(spolka: str) -> dict:
     klucz = spolka.strip().lower()
@@ -709,6 +819,29 @@ def get_spolka_config(spolka: str) -> dict:
         raise ValueError(
             f"Nieznana firma: {klucz}. Dozwolone: {', '.join(COMPANIES)}"
         )
+
+def combine_attachments(csv_map: dict[str, str], pdf_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    all_nips = set(csv_map) | set(pdf_map)
+    out = {}
+    for nip in all_nips:
+        files = []
+        if csv_map.get(nip):         # pojedyncza ścieżka CSV z Twojej funkcji export_grouped_csvs
+            files.append(csv_map[nip])
+        files.extend(pdf_map.get(nip, []))
+        out[nip] = files
+    return out
+
+def build_pdf_map(pobrane_faktury: list[dict]) -> dict[str, list[str]]:
+    pdf_map: dict[str, list[str]] = {}
+    for r in pobrane_faktury:
+        if not r.get("ok"):
+            continue
+        nip = _only_digits(r.get("buyer_tax_no"))
+        path = r.get("path")
+        if not nip or not path:
+            continue
+        pdf_map.setdefault(nip, []).append(path)
+    return pdf_map
 
 def _only_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or "")).strip()
@@ -769,8 +902,11 @@ def czytaj_plik(
     if df.empty:
         logging.info("[INFO] Po filtracjach brak wierszy.")
         return df
+    #DEBUG ONLY
+    # print("dane z dataframea")
+    # print(df)
 
-    # 3) wczytaj recipients (jeśli jest)
+    # 3) wczytaj plik odbiorcy (jeśli jest)
     rec_list = read_recipients_list(recipients_file) if recipients_file else None
     if rec_list is not None and not rec_list.empty:
         rec_list["nip_clean"] = rec_list["nip"].apply(_only_digits)
@@ -783,6 +919,11 @@ def czytaj_plik(
     if send_only:
         recipients_df = build_recipients_send_only(df, rec_list, attachments_by_nip)
         logging.info("[SEND-ONLY] Odbiorców: %d", len(recipients_df))
+
+        filtered, pobrane_faktury = get_faktur()
+        pdf_map = build_pdf_map(pobrane_faktury)
+        all_attach_map = combine_attachments(attachments_by_nip, pdf_map)
+        recipients_df["attachment_paths"] = recipients_df["nip"].map(all_attach_map)
 
         mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
         mail_ok = sum(1 for r in mail_results if r.get("ok"))
@@ -839,6 +980,7 @@ def czytaj_plik(
     mail_ok = sum(1 for r in mail_results if r.get("ok"))
     mail_bad = len(mail_results) - mail_ok
     logging.info("[MAIL] OK: %d, BŁĘDY: %d", mail_ok, mail_bad)
+    get_faktur()
 
     # podsumowanie
     summary = {
