@@ -32,6 +32,7 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "utf-8-sig")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", ".")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 EMAIL_HTML_TEMPLATE =""" <!DOCTYPE html>
 <html>
@@ -262,9 +263,10 @@ def render_email_html(invoice_link: Optional[str], company_name: str) -> str:
     link = invoice_link or "#"  # jeśli brak linku – pokaż przycisk bez odnośnika
     return html.replace("{INVOICE_LINK}", link).replace("{COMPANY_NAME}", company_name)
 
-def _money2(x) -> float:
-    """Zaokrąglenie kwoty do 2 miejsc (HALF_UP), zwraca float do JSON."""
-    return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+def _money2(x) -> Decimal:
+    """Zaokrąglenie kwoty do 2 miejsc (HALF_UP), zwraca Decimal do JSON."""
+    return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
 
 def _norm_doc_no(x: str) -> str:
     if pd.isna(x):
@@ -273,13 +275,50 @@ def _norm_doc_no(x: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s.upper()
 
-def handle_duplicates(df: pd.DataFrame, action: str = "warn") -> pd.DataFrame:
-    before = len(df)
-    df2 = df.drop_duplicates(subset=["NIP", "Numer dokumentu"], keep="first")
-    after = len(df2)
-    if action == "warn" and before != after:
-        logging.info("[DUP] Usunięto %d duplikatów. Zostało %d rekordów.", before - after, after)
-    return df2
+def find_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    required = {"Numer dokumentu", "Netto", "VAT", "Brutto"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Brak kolumn: {', '.join(sorted(missing))}")
+    d = df.copy()
+    d["__doc_no_norm"] = df["Numer dokumentu"].map(_norm_doc_no)
+    d["__netto_gr"] =(df["Netto"])
+    d["__vat_gr"] = (df["VAT"])
+    d["__brut_gr"] = (df["Brutto"])
+
+    mdup = d.duplicated(subset=["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"], keep="first")
+    group_sizes = d.groupby(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])["Numer dokumentu"].transform(
+        "size")
+    d["__is_dup_group"] = group_sizes > 1
+    full_dup_groups = d.loc[d["__is_dup_group"]].copy()
+
+    return d, full_dup_groups.sort_values(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])
+
+def handle_duplicates(df: pd.DataFrame, action="drop_keep_first", report_path: Optional[str] = None) -> pd.DataFrame:
+    d, full_dups = find_duplicates(df)
+
+    if not full_dups.empty:
+        preview_cols = ["Numer dokumentu", "Netto", "VAT", "Brutto"]
+        logging.warning("[DUP] Wykryto duplikaty:\n%s", full_dups[preview_cols].to_string(index=False))
+
+        if report_path:
+            full_dups[preview_cols].to_csv(report_path, index=False, encoding="utf-8-sig")
+            logging.info("[DUP] Raport duplikatów zapisany: %s", report_path)
+
+        if action in ("drop_keep_first", "drop_keep_last"):
+            keep = "first" if action == "drop_keep_first" else "last"
+            mask = d.duplicated(subset=["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"], keep=keep)
+            cleaned = df.loc[~mask].copy()
+            logging.info("[DUP] Usunięto %d zduplikowanych wierszy (%s).", mask.sum(), action)
+            return cleaned
+        elif action == "warn":
+            return df
+        elif action == "error":
+            raise ValueError("W pliku znajdują się duplikaty (patrz log powyżej).")
+    else:
+        logging.info("[DUP] Nie znaleziono duplikatów.")
+
+    return df
 
 def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
     """SELECT nip, status FROM merchanci WHERE nip IN (...)"""
@@ -415,34 +454,70 @@ def lista_faktur_sm3() -> List[dict]:
     data = r.json()
     return [f for f in data if str(f.get("number", "")).endswith("/sm3")]
 
+def _to_decimal(val: str) -> Decimal:
+    """Konwersja string/liczby na Decimal z kropką jako separatorem."""
+    s = str(val).strip().replace(",", ".")
+    try:
+        return Decimal(s)
+    except:
+        return Decimal("0.00")
+
 def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] = None) -> List[Dict]:
     """
     Przygotowuje rekordy do wystawienia faktur:
-    - agreguje po NIP (Netto sum, Kontrahent first),
-    - liczona stawka 3% netto i brutto (VAT 23%),
+    - agreguje po NIP,
+    - liczy stawkę 3% netto i brutto (Excel-style: zaokrąglenie per-row),
     - email bierze z recipients_df (jeśli podane).
     """
-    grouped = (
-        df.groupby("NIP", as_index=False)
-          .agg({"Netto": "sum", "Kontrahent": "first"})
-    )
-    grouped["stawka_netto_3p"]  = grouped["Netto"] * 0.03
-    grouped["stawka_brutto_3p"] = grouped["stawka_netto_3p"] * 1.23
 
+    # 1) Normalizacja kwot
+    df["Netto"] = (
+        df["Netto"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .map(lambda x: Decimal(x) if x not in ("", "nan", "None", "") else Decimal("0.00"))
+    )
+
+    # 2) Funkcja w stylu Excela – zaokrągla każdy wiersz osobno
+    def calc_excel_style(values: pd.Series) -> (Decimal, Decimal):
+        per_row_net = [
+            (v * Decimal("0.03")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            for v in values
+        ]
+        netto_sum = sum(per_row_net, Decimal("0.00"))
+        brutto_sum = [
+            (n * Decimal("1.23")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            for n in per_row_net
+        ]
+        return netto_sum, sum(brutto_sum, Decimal("0.00"))
+
+    # 3) Grupowanie po NIP i liczenie w Excel-style
     rows = []
-    for _, r in grouped.iterrows():
+    for nip, sub in df.groupby("NIP"):
+        kontrahent = sub["Kontrahent"].iloc[0]
+        netto_3p, brutto_3p = calc_excel_style(sub["Netto"])
+
         email = None
         if recipients_df is not None:
-            rec = recipients_df.loc[recipients_df["nip"] == str(r["NIP"])]
+            rec = recipients_df.loc[recipients_df["nip"] == str(nip)]
             if not rec.empty:
                 email = rec["email"].iloc[0]
 
         rows.append({
-            "buyer_name":   str(r["Kontrahent"]).strip(),
-            "buyer_tax_no": str(r["NIP"]).strip(),
-            "buyer_email":  email,
-            "amount_gross": _money2(r["stawka_brutto_3p"]),
+            "buyer_name": str(kontrahent).strip(),
+            "buyer_tax_no": str(nip).strip(),
+            "buyer_email": email,
+            "amount_net": float(netto_3p),
+            "amount_gross": float(brutto_3p),
         })
+
+        # DEBUG
+        print(f"DEBUG NIP={nip}")
+        print(f"  Netto wartości: {list(sub['Netto'])}")
+        print(f"  Stawka 3% netto (Excel-style): {netto_3p}")
+        print(f"  Stawka 3% brutto (Excel-style): {brutto_3p}")
+        print("===")
+
     return rows
 
 
@@ -847,6 +922,15 @@ def build_pdf_map(pobrane_faktury: list[dict]) -> dict[str, list[str]]:
 def _only_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or "")).strip()
 
+def export_duplicates_report(df: pd.DataFrame, out_path: str):
+    _, full_dups = find_duplicates(df)
+    if full_dups.empty:
+        print("[DUP] Brak duplikatów – raport nie został utworzony.")
+        return
+    cols = ["Numer dokumentu", "Netto", "VAT", "Brutto"]
+    full_dups[cols].to_csv(out_path, index=False, encoding="utf-8")
+    print(f"[DUP] Raport duplikatów zapisany: {out_path}")
+
 # =========================
 # Główna logika
 # =========================
@@ -873,18 +957,23 @@ def czytaj_plik(
     if df is None or df.empty:
         raise ValueError("Pusty DataFrame – sprawdź plik wejściowy.")
 
-    df["NIP"] = df["NIP"].astype(str).map(_only_digits)
+    #DEBUG ONLY
+    # print("Rozmiar dataframe przed oczyszczeniem:")
+    # przed = len(df)
+    # print(przed)
+    # df.drop_duplicates()
+    # po = len(df)
+    # print("Rozmiar dataframe po oczysczeniu")
+    # print(po)
+    #oczysczanie plików
 
-    # print("Lista nipów z pliku z fakturami")
-    # print(df["NIP"])
+    df = handle_duplicates(df, action="drop_keep_first", report_path=os.path.join(OUTPUT_DIR, f"duplikaty_{ts}.csv"))
+
+    df["NIP"] = df["NIP"].astype(str).map(_only_digits)
 
     # załączniki CSV per NIP
     attachments_by_nip = export_grouped_csvs(df, att_dir, encoding=OUTPUT_ENCODING)
     attachments_by_nip = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
-
-    # 2) czyszczenie danych
-    df = df.replace("", pd.NA)
-    df = handle_duplicates(df, action="warn")
 
     mask_empty_nip = df["NIP"].isna() | (df["NIP"].astype(str).str.strip() == "")
     if mask_empty_nip.any():
@@ -893,19 +982,21 @@ def czytaj_plik(
         logging.warning("[WARN] Pominięto %d wierszy z pustym NIP-em → %s", int(mask_empty_nip.sum()), out)
     df = df.loc[~mask_empty_nip].copy()
 
-    status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
-    mask_prem = df["NIP"].astype(str).apply(
-        lambda nip: (status_map.get(re.sub(r"\D", "", str(nip)), "") or "").lower() == "premerchant"
-    )
-    if mask_prem.any():
-        out = os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv")
-        df.loc[mask_prem].to_csv(out, index=False, encoding=OUTPUT_ENCODING)
-        logging.warning("[WARN] Pominięto %d wierszy PREMERCHANT → %s", int(mask_prem.sum()), out)
-    df = df.loc[~mask_prem].copy()
+    # sprawdzanie statusu merchanta w bazie danych
+    # status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
+    # mask_prem = df["NIP"].astype(str).apply(
+    #     lambda nip: (status_map.get(re.sub(r"\D", "", str(nip)), "") or "").lower() == "premerchant"
+    # )
+    # if mask_prem.any():
+    #     out = os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv")
+    #     df.loc[mask_prem].to_csv(out, index=False, encoding=OUTPUT_ENCODING)
+    #     logging.warning("[WARN] Pominięto %d wierszy PREMERCHANT → %s", int(mask_prem.sum()), out)
+    # df = df.loc[~mask_prem].copy()
 
     if df.empty:
         logging.info("[INFO] Po filtracjach brak wierszy.")
         return df
+
     #DEBUG ONLY
     # print("dane z dataframea")
     # print(df)
@@ -972,7 +1063,12 @@ def czytaj_plik(
         return df
 
     # 5) TRYB STANDARDOWY (Fakturownia)
-    rows = build_invoice_rows(df, rec_list)   # <== PRZEKAZUJĘ rec_list żeby dołączyć email
+    if rec_list is not None and not rec_list.empty:
+        allowed_nips = set(rec_list["nip_clean"])
+        df = df[df["nip_clean"].isin(allowed_nips)].copy()
+        logging.info("[INFO] Po filtrze recipients zostało %d wierszy.", len(df))
+
+    rows = build_invoice_rows(df, rec_list)  # teraz rows zawiera tylko kontrahentów z recipients
     logging.info("[INFO] Do wystawienia faktur: %d rekordów.", len(rows))
 
     wyniki = dodaj_faktury(spolka, rows)
