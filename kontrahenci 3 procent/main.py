@@ -470,53 +470,52 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
     - email bierze z recipients_df (jeśli podane).
     """
 
-    # 1) Normalizacja kwot
     df["Netto"] = (
         df["Netto"]
         .astype(str)
         .str.replace(",", ".", regex=False)
-        .map(lambda x: Decimal(x) if x not in ("", "nan", "None", "") else Decimal("0.00"))
+        .map(lambda x: Decimal(x) if x not in ("", "nan", "None", "") else Decimal("0"))
     )
 
-    # 2) Funkcja w stylu Excela – zaokrągla każdy wiersz osobno
-    def calc_excel_style(values: pd.Series) -> (Decimal, Decimal):
-        per_row_net = [
-            (v * Decimal("0.03")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            for v in values
-        ]
-        netto_sum = sum(per_row_net, Decimal("0.00"))
-        brutto_sum = [
-            (n * Decimal("1.23")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            for n in per_row_net
-        ]
-        return netto_sum, sum(brutto_sum, Decimal("0.00"))
+    grouped = (
+        df.groupby("NIP", as_index=False)
+        .agg({"Netto": "sum", "Kontrahent": "first"})
+    )
 
-    # 3) Grupowanie po NIP i liczenie w Excel-style
+    # 3) Obliczenia (zaokrąglanie dopiero tutaj, do 4 miejsc)
+    grouped["stawka_netto_3p"] = grouped["Netto"].apply(
+        lambda x: (x * Decimal("0.03")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    )
+    grouped["stawka_brutto_3p"] = grouped["stawka_netto_3p"].apply(
+        lambda x: (x * Decimal("1.23")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    )
+
+    # 4) Przygotowanie wyników
     rows = []
-    for nip, sub in df.groupby("NIP"):
-        kontrahent = sub["Kontrahent"].iloc[0]
-        netto_3p, brutto_3p = calc_excel_style(sub["Netto"])
-
+    for _, r in grouped.iterrows():
         email = None
         if recipients_df is not None:
-            rec = recipients_df.loc[recipients_df["nip"] == str(nip)]
+            rec = recipients_df.loc[recipients_df["nip"] == str(r["NIP"])]
             if not rec.empty:
                 email = rec["email"].iloc[0]
 
         rows.append({
-            "buyer_name": str(kontrahent).strip(),
-            "buyer_tax_no": str(nip).strip(),
+            "buyer_name": str(r["Kontrahent"]).strip(),
+            "buyer_tax_no": str(r["NIP"]).strip(),
             "buyer_email": email,
-            "amount_net": float(netto_3p),
-            "amount_gross": float(brutto_3p),
+            "amount_net": str(r["stawka_netto_3p"]),  # zostawiam w Decimal jako string (dokładne 4 miejsca)
+            "amount_gross": str(r["stawka_brutto_3p"]),
         })
 
-        # DEBUG
-        print(f"DEBUG NIP={nip}")
-        print(f"  Netto wartości: {list(sub['Netto'])}")
-        print(f"  Stawka 3% netto (Excel-style): {netto_3p}")
-        print(f"  Stawka 3% brutto (Excel-style): {brutto_3p}")
-        print("===")
+    # DEBUG
+    print("=== DEBUG build_invoice_rows ===")
+    for _, r in grouped.iterrows():
+        print(
+            f"NIP={r['NIP']} | Netto SUM={r['Netto']} | "
+            f"stawka 3% netto={r['stawka_netto_3p']} | "
+            f"stawka 3% brutto={r['stawka_brutto_3p']}"
+        )
+    print("================================")
 
     return rows
 
