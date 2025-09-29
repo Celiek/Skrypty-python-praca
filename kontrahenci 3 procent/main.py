@@ -104,7 +104,7 @@ COMPANIES = {
         "nrb": os.getenv("SHUMEE_NRB", "07114011080000314718001007"),
         "bank_code": os.getenv("SHUMEE_BANK_CODE", "11401108"),
         "email": os.getenv("SHUMEE_EMAIL", "faktury@shumee.pl"),
-        "server_host":os.getenv("SHUMEE_SERVER_HOST", "localhost"),
+        "server_host":os.getenv("SHUMEE_SERVER_HOST", "imap.serwer1694120.home.pl"),
         "kontakt":os.getenv("SHUMEE_KONTAKT", "kontakt@shumee.pl"),
         "password":os.getenv("SHUMEE_PASS"),
     },
@@ -125,7 +125,7 @@ COMPANIES = {
         "bank_code": os.getenv("EXTRASTORE_BANK_CODE", "11402004"),
         "email": os.getenv("SHUMEE_EMAIL", "faktury_extra@shumee.pl"),
         "server_host":os.getenv("EXTRA_SERVER_HOST", "imap.serwer1694120.home.pl"),
-        "kontakt": os.getenv("SHUMEE_KONTAKT", "kontakt@greatstore.pl"),
+        "kontakt": os.getenv("SHUMEE_KONTAKT", "kontakt@extrastore.pl"),
         "password":os.getenv("EXTRASTORE_PASS"),
     },
 }
@@ -263,11 +263,6 @@ def render_email_html(invoice_link: Optional[str], company_name: str) -> str:
     link = invoice_link or "#"  # jeśli brak linku – pokaż przycisk bez odnośnika
     return html.replace("{INVOICE_LINK}", link).replace("{COMPANY_NAME}", company_name)
 
-def _money2(x) -> Decimal:
-    """Zaokrąglenie kwoty do 2 miejsc (HALF_UP), zwraca Decimal do JSON."""
-    return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
 def _norm_doc_no(x: str) -> str:
     if pd.isna(x):
         return ""
@@ -320,20 +315,20 @@ def handle_duplicates(df: pd.DataFrame, action="drop_keep_first", report_path: O
 
     return df
 
-def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
-    """SELECT nip, status FROM merchanci WHERE nip IN (...)"""
-    nums = [re.sub(r"\D", "", str(n)) for n in nipy if n]
-    nums = [n for n in nums if n]
-    if not nums:
-        return {}
-    placeholders = ",".join(["%s"] * len(nums))
-    query = f"SELECT nip, status FROM merchanci WHERE nip IN ({placeholders})"
-    result = {}
-    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(query, tuple(nums))
-        for row in cur.fetchall():
-            result[str(row["nip"])] = row["status"]
-    return result
+# def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
+#     """SELECT nip, status FROM merchanci WHERE nip IN (...)"""
+#     nums = [re.sub(r"\D", "", str(n)) for n in nipy if n]
+#     nums = [n for n in nums if n]
+#     if not nums:
+#         return {}
+#     placeholders = ",".join(["%s"] * len(nums))
+#     query = f"SELECT nip, status FROM merchanci WHERE nip IN ({placeholders})"
+#     result = {}
+#     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+#         cur.execute(query, tuple(nums))
+#         for row in cur.fetchall():
+#             result[str(row["nip"])] = row["status"]
+#     return result
 
 # def fetch_emails(nipy) -> pd.DataFrame:
 #     """Zwraca DF kolumny: nip, email (dla listy NIP-ów)."""
@@ -359,21 +354,21 @@ def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
 #     return pd.DataFrame(rows)
 
 def build_recipients_report_only(df, recipients_df, mail_results, attachments_by_nip, output_file):
-    # 1) Oczyść NIP wszędzie do samych cyfr
+    # oczyszczanie nipu
     df = df.copy()
     recipients_df = recipients_df.copy()
 
     df["NIP_clean"] = df["NIP"].astype(str).map(_only_digits)
     recipients_df["nip_clean"] = recipients_df["nip"].astype(str).map(_only_digits)
 
-    # 2) Zrób unikalną listę odbiorców per NIP (jeśli było kilka maili dla jednego NIP – zostaw pierwszy)
+    # 2agregacja po nipie
     recipients_unique = (
         recipients_df
         .sort_values(["nip_clean", "email"])              # deterministycznie
         .drop_duplicates(subset=["nip_clean"], keep="first")
     )
 
-    # 3) Sumy z pliku wejściowego tylko dla NIP-ów z recipients
+    # sumyz pliku wejściowego tylko dla NIP-ów z pliku odbiorców
     sums = (
         df[df["NIP_clean"].isin(recipients_unique["nip_clean"])]
         .groupby("NIP_clean", as_index=False)
@@ -382,7 +377,7 @@ def build_recipients_report_only(df, recipients_df, mail_results, attachments_by
              Brutto=("Brutto", "sum"))
     )
 
-    # 4) Attachmenty – oczyść klucze w mapie i zamień na DF, żeby merge był jednoznaczny
+    # załączniki ozyszczanie kluczy w mapie i zamiana na DF, żeby merge był jednoznaczny
     att_clean = { _only_digits(k): v for k, v in (attachments_by_nip or {}).items() }
     att_df = (pd.DataFrame({
                 "nip_clean": list(att_clean.keys()),
@@ -391,13 +386,13 @@ def build_recipients_report_only(df, recipients_df, mail_results, attachments_by
              if att_clean else pd.DataFrame(columns=["nip_clean","attachment_path"])
     )
 
-    # 5) Wyniki wysyłki (po emailu) – też deduplikuj
+    # 5) Wyniki wysyłki (po emailu) – też nie duplikuj
     mail_df = pd.DataFrame(mail_results or [])
     if not mail_df.empty:
         mail_df.rename(columns={"email": "Email", "ok": "Wyslano_OK"}, inplace=True)
         mail_df = (mail_df
                    .sort_values(["Email"])
-                   .drop_duplicates(subset=["Email"], keep="last"))  # ostatni status wygrywa
+                   .drop_duplicates(subset=["Email"], keep="last"))  # ostatni status wysłania emaila
     else:
         mail_df = pd.DataFrame(columns=["Email","Wyslano_OK"])
 
@@ -466,8 +461,8 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
     """
     Przygotowuje rekordy do wystawienia faktur:
     - agreguje po NIP,
-    - liczy stawkę 3% netto i brutto (Excel-style: zaokrąglenie per-row),
-    - email bierze z recipients_df (jeśli podane).
+    - liczy stawkę 3% netto i brutto zaokrąglenie po rzędach,
+    - email bierze z recipients_df (jeśli jest podany).
     """
 
     df["Netto"] = (
@@ -482,10 +477,13 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
         .agg({"Netto": "sum", "Kontrahent": "first"})
     )
 
-    # 3) Obliczenia (zaokrąglanie dopiero tutaj, do 4 miejsc)
+    grouped = grouped[grouped["Netto"] > 0]
+
+    # obliczenia sumy zaokrąglone do 4 miejsc po przecinku
     grouped["stawka_netto_3p"] = grouped["Netto"].apply(
         lambda x: (x * Decimal("0.03")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     )
+
     grouped["stawka_brutto_3p"] = grouped["stawka_netto_3p"].apply(
         lambda x: (x * Decimal("1.23")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     )
@@ -503,7 +501,7 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
             "buyer_name": str(r["Kontrahent"]).strip(),
             "buyer_tax_no": str(r["NIP"]).strip(),
             "buyer_email": email,
-            "amount_net": str(r["stawka_netto_3p"]),  # zostawiam w Decimal jako string (dokładne 4 miejsca)
+            "amount_net": str(r["stawka_netto_3p"]),  # typ decimal ( dokłądność do 4 miejsc po przecinku)
             "amount_gross": str(r["stawka_brutto_3p"]),
         })
 
@@ -779,6 +777,7 @@ def read_recipients_list(path: str) -> pd.DataFrame:
         "link": df.get("link", pd.Series([""]*len(df))).astype(str).str.strip(),
         "kontrahent": df.get("Kontrahent", pd.Series([""]*len(df))).astype(str).str.strip(),
     })
+
     # prosta walidacja
     out = out[out["nip"].str.len() == 10]
     out = out[out["email"].str.contains(r"@")]
