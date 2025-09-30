@@ -21,8 +21,22 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 
+# TODO
+# Dodać wykorzystanie bazy danych do wyszukiwania fakturowania kontrahentów
+# Dodać opcję zapisu faktur od kontrahentów do bazy danych
 
-#dodać logowanie duplikatów
+#dodać logowanie duplikatów DONE
+
+# zmienić nazwę pozycji DONE
+# zmienić nazwę spółki
+# zmienić treść
+# tytuł : Faktura prowizyjna 3% od sprzedanych faktur - spółka supermerchant s.p.a
+# zmienić nagłówek wiadomości : Prowizja 3% od sprzedanych towarów
+# zmiana numeru faktury DONE
+# nie faktury tylko dokumenty księgowe DONE
+# usunąć logo DONE
+# dodac tryb tylko wystaw faktury
+
 
 # =========================
 # Konfiguracja / stałe
@@ -41,35 +55,18 @@ EMAIL_HTML_TEMPLATE =""" <!DOCTYPE html>
   <title>Faktura 3%</title>
 </head>
 <body style="margin:0; padding:0; background-color:#ffffff; font-family: Arial, sans-serif;">
-
-  <!-- LOGO -->
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" align="center" style="max-width:600px; margin:auto;">
-    <tr>
-      <td align="center" style="padding:20px;">
-        <img src="https://www.dropbox.com/scl/fi/f93ozwqr05vvjh9eul8mb/logo.png?rlkey=fh25yqh7w4t1rp5kawx78va3k&st=dp1boi0r&raw=1" alt="Super Merchant" width="120" border="0" style="display:block;">
-      </td>
-    </tr>
-  </table>
-
   <!-- NAGŁÓWEK -->
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" align="center" style="max-width:600px; margin:auto; background:#f7fbfc;">
     <tr>
       <td align="center" style="padding:20px; font-size:20px; font-weight:bold; color:#000000;">
-        Miesiąc dobiegł końca!
+       Prowizja 3% od sprzedanych towarów
       </td>
     </tr>
     <tr>
       <td align="center" style="padding:0 20px 20px; font-size:14px; line-height:20px; color:#333333;">
-        Poprzedni okres rozliczeniowy dobiegł końca,<br>
-        poniżej znajdziesz link do pobrania faktury 3% za sprzedane artykuły,<br>
-        a w załączniku listę faktur na podstawie których została wystawiona.
-      </td>
-    </tr>
-    <tr>
-      <td align="center" style="padding:20px;">
-        <a href="{INVOICE_LINK}" target="_blank" style="background-color:#0077DA; color:#ffffff; text-decoration:none; padding:12px 24px; border-radius:4px; font-size:14px; font-weight:bold; display:inline-block;">
-          Pobierz fakturę
-        </a>
+        Szanowni Państwo,<br>
+        Przesyłamy rozliczenie prowizyjne za ubiegły miesiąc wraz z zestawieniem faktur,których dotyczy prowizja.
+        Faktury stanowią podstawę do rozliczenia prowizyjnego zgodnie z zaakceptowanym regulaminem współpracy Super Merchant.<br>
       </td>
     </tr>
   </table>
@@ -99,7 +96,7 @@ DB_CONFIG = {
 
 COMPANIES = {
     "shumee": {
-        "name_addr": os.getenv("SHUMEE_NAME_ADDR", "Shumee Sp. z.o.o. ..."),
+        "name_addr": os.getenv("SHUMEE_NAME_ADDR", "Shumee Sp. z.o.o."),
         "name" : os.getenv("NAZWA","SHUMEE"),
         "nrb": os.getenv("SHUMEE_NRB", "07114011080000314718001007"),
         "bank_code": os.getenv("SHUMEE_BANK_CODE", "11401108"),
@@ -109,7 +106,7 @@ COMPANIES = {
         "password":os.getenv("SHUMEE_PASS"),
     },
     "greatstore": {
-        "name_addr": os.getenv("GREATSTORE_NAME_ADDR", "Greatstore Sp. z.o.o. ..."),
+        "name_addr": os.getenv("GREATSTORE_NAME_ADDR", "Greatstore Sp. z.o.o."),
         "name" : os.getenv("NAZWA","GREATSTORE"),
         "nrb": os.getenv("GREATSTORE_NRB", "18102055610000310200035501"),
         "bank_code": os.getenv("GREATSTORE_BANK_CODE", "10205561"),
@@ -119,7 +116,7 @@ COMPANIES = {
         "password":os.getenv("GREATSTORE_PASS"),
     },
     "extrastore": {
-        "name_addr": os.getenv("EXTRASTORE_NAME_ADDR", "Extrastore Sp. z.o.o. ..."),
+        "name_addr": os.getenv("EXTRASTORE_NAME_ADDR", "Extrastore Sp. z.o.o."),
         "name" : os.getenv("NAZWA","EXTRASTORE"),
         "nrb": os.getenv("EXTRASTORE_NRB", "05114020040000330280429939"),
         "bank_code": os.getenv("EXTRASTORE_BANK_CODE", "11402004"),
@@ -210,14 +207,14 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
 
     return s
 
-def export_grouped_csvs(df: pd.DataFrame,out_dir: str, *, encoding: str ="utf-8-sig") -> Dict[str,str]:
+def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     wanted = ["Kontrahent", "NIP", "Numer dokumentu", "Data", "Netto", "VAT", "Brutto"]
     cols = [c for c in wanted if c in df.columns]
     if not cols:
-        raise ValueError("Brak kolumn do eksportu CSV — sprawdź nazwy w DataFrame.")
+        raise ValueError("Brak kolumn do eksportu XLSX — sprawdź nazwy w DataFrame.")
 
-    out_map: Dict[str, str] = {}
+    out_map: dict[str, str] = {}
     g = df.groupby("NIP", dropna=False, as_index=False)
     for nip, sub in g:
         nip_str = str(nip).strip()
@@ -225,12 +222,25 @@ def export_grouped_csvs(df: pd.DataFrame,out_dir: str, *, encoding: str ="utf-8-
         if "Kontrahent" in sub.columns and not sub["Kontrahent"].isna().all():
             kontrahent = str(sub["Kontrahent"].iloc[0] or "")
 
-        fname = f"{nip_str}_{_slugify_filename(kontrahent)}.csv"
+        sub = sub.copy()
+        sub["Prowizja_3proc"] = (
+            pd.to_numeric(sub["Netto"], errors="coerce").fillna(0) * 0.03
+        ).round(2)
+
+        # 🔹 suma prowizji dla całego arkusza
+        suma_prowizji = sub["Prowizja_3proc"].sum().round(2)
+        sub["Suma_prowizji"] = suma_prowizji
+
+        fname = f"{nip_str}_{_slugify_filename(kontrahent)}.xlsx"
         fpath = os.path.join(out_dir, fname)
-        sub[cols].to_csv(fpath, index=False, encoding=encoding, sep=";")
+        sub[cols + ["Prowizja_3proc", "Suma_prowizji"]].to_excel(
+            fpath, index=False, sheet_name="Faktury"
+        )
         out_map[nip_str] = os.path.abspath(fpath)
 
     return out_map
+
+
 
 def prepare_recipients(rows_from_build: List[Dict], wyniki_faktur: List[Dict], attachments_by_nip: Dict[str, str]) -> pd.DataFrame:
     df_rows = pd.DataFrame(rows_from_build)
@@ -352,6 +362,80 @@ def handle_duplicates(df: pd.DataFrame, action="drop_keep_first", report_path: O
 #     print("Emaile z bazy danych:")
 #     print(rows)
 #     return pd.DataFrame(rows)
+
+def build_full_report(df: pd.DataFrame,
+                      recipients_df: pd.DataFrame,
+                      mail_results: list[dict],
+                      attachments_by_nip: dict[str, str],
+                      output_file: str):
+    """
+    Raport zbiorczy:
+    - 1 wiersz per kontrahent (NIP)
+    - dane: nazwa, nip, email, suma Netto/VAT/Brutto, ilość dokumentów, numery dokumentów, status maila
+    - dodatkowy plik z sumą globalną
+    """
+    df = df.copy()
+    df["NIP_clean"] = df["NIP"].astype(str).map(_only_digits)
+
+    recipients_df = recipients_df.copy()
+    recipients_df["nip_clean"] = recipients_df["nip"].astype(str).map(_only_digits)
+
+    # agregacja dokumentów per NIP
+    docs_grouped = (
+        df.groupby("NIP_clean")
+        .agg(
+            Netto=("Netto", "sum"),
+            VAT=("VAT", "sum"),
+            Brutto=("Brutto", "sum"),
+            ilosc_dokumentow=("Numer dokumentu", "count"),
+            dokumenty=("Numer dokumentu", lambda x: " | ".join(map(str, x)))
+        )
+        .reset_index()
+        .rename(columns={"NIP_clean": "nip_clean"})  # 🔹 DODAJ TO
+    )
+
+    # mail results -> DF
+    mail_df = pd.DataFrame(mail_results or [])
+    if not mail_df.empty:
+        mail_df.rename(columns={"email": "Email", "ok": "Wyslano_OK"}, inplace=True)
+    else:
+        mail_df = pd.DataFrame(columns=["Email", "Wyslano_OK"])
+
+    # scalanie
+    raport = (
+        recipients_df
+        .merge(docs_grouped, on="nip_clean", how="left")
+        .merge(mail_df[["Email", "Wyslano_OK"]], left_on="email", right_on="Email", how="left")
+    )
+
+    # załączniki
+    att_clean = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
+    raport["attachment_path"] = raport["nip_clean"].map(att_clean).fillna("")
+
+    # zaokrąglenia
+    for c in ["Netto", "VAT", "Brutto"]:
+        raport[c] = pd.to_numeric(raport[c], errors="coerce").fillna(0).round(2)
+    # zapis raportu szczegółowego
+    base, ext = os.path.splitext(output_file)
+    raport_path = f"{base}_full{ext or '.csv'}"
+    raport.to_csv(raport_path, index=False, encoding=OUTPUT_ENCODING, sep=";")
+    logging.info("[SAVE] Raport pełny: %s", raport_path)
+
+    # raport zbiorczy (sumy globalne)
+    summary = {
+        "suma_netto": raport["Netto"].sum(),
+        "suma_vat": raport["VAT"].sum(),
+        "suma_brutto": raport["Brutto"].sum(),
+        "suma_dokumentow": raport["ilosc_dokumentow"].sum(),
+        "ilosc_kontrahentow": raport.shape[0],
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    summary_path = f"{base}_summary{ext or '.csv'}"
+    pd.DataFrame([summary]).to_csv(summary_path, index=False, encoding=OUTPUT_ENCODING, sep=";")
+    logging.info("[SAVE] Raport zbiorczy (sumy globalne): %s", summary_path)
+
+    return raport, raport_path, summary_path
+
 
 def build_recipients_report_only(df, recipients_df, mail_results, attachments_by_nip, output_file):
     # oczyszczanie nipu
@@ -556,10 +640,11 @@ def send_Email(spolka: str,
     use_ssl = os.getenv("SMTP_USE_SSL", "1") == "1"
     #use_ssl = False
 
+    subject = f"Faktura prowizyjna 3% od sprzedanych faktur" + cfg["name_addr"]
 
     company_name = cfg.get("name") or spolka.upper()
     if not subject:
-        subject = f"{company_name} - faktura"
+        subject = f"Faktura prowizyjna 3% od sprzedanych faktur" + cfg["name_addr"]
 
     results = []
 
@@ -611,7 +696,6 @@ def send_Email(spolka: str,
             alt.attach(MIMEText(html_body, "html", "utf-8"))
             msg.attach(alt)
 
-            # 2) Zbierz ścieżki załączników (lista, pojedynczy, ewentualnie string rozdzielany ';')
             paths = []
             ap_list = getattr(row, "attachment_paths", None)
             if isinstance(ap_list, list):
@@ -625,7 +709,7 @@ def send_Email(spolka: str,
             if isinstance(ap_strlist, str) and ap_strlist.strip():
                 paths.extend([p.strip() for p in ap_strlist.split(";") if p.strip()])
 
-            # 3) Dołącz wszystkie istniejące pliki
+            #  Dołączainie obu plików
             for p in paths:
                 if not p:
                     continue
@@ -727,7 +811,7 @@ def dodaj_faktury(spolka: str, items: List[Dict]) -> List[Dict]:
                     "department_id": DEPARTMENT_ID[spolka],
                     **({"buyer_email": it["buyer_email"]} if it.get("buyer_email") else {}),
                     "positions": [{
-                        "name": f"płatność za usługę za okres {miesiace[poprzedni.month]} {today.year}",
+                        "name": f"Prowizja 3% od sprzedanych towarów za okres {miesiace[poprzedni.month]} {today.year}",
                         "tax": 23,
                         "total_price_gross": it["amount_gross"],
                         "quantity": 1
@@ -800,52 +884,33 @@ def _safe_name(name: str) -> str:
 # kod do pobierania faktur w formie pdf z fakturowni
 # do wysyłania jako załącznik w emailach
 def get_faktur():
-    # dodać paginacje
-    lista_faktur = "https://shumee.fakturownia.pl/invoices.json"
-
-    # + id_faktury.pdf + ?api_token =
-    link_do_pobrania ="https://shumee.fakturownia.pl/invoices/{invoice_id}.pdf"
-
-    today = date.today().strftime("%Y-%m-%d")
+    url = "https://shumee.fakturownia.pl/invoices.json"
+    link_pdf = "https://shumee.fakturownia.pl/invoices/{invoice_id}.pdf"
 
     all_invoices = []
     page = 1
     while True:
         params = {
             "api_token": os.getenv("API_KEY"),
-            "sell_date":today,
-            "page":page,
-            "per_page":100,
-            "period":"this_month"
+            "page": page,
+            "per_page": 100,
+            "period": "this_month"   # tylko bieżący miesiąc
         }
-
-        r=requests.get(lista_faktur,params=params,timeout=60)
-        r.raise_for_status()
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code != 200:
+            logging.error("[PDF] Błąd pobierania faktur (kod %s): %s", r.status_code, r.text[:200])
+            break
         data = r.json()
-
         if not data:
             break
         all_invoices.extend(data)
+        logging.info("[PDF] pobrano stronę %s → %s faktur", page, len(data))
+        page += 1
 
-        print(f"[INFO] Pobrana strona {page}, ogólnych rekordów{len(data)}")
-        page +=1
-
-    invoices_sm3 = [inv for inv in all_invoices if str(inv.get("number","")).endswith("sm3")]
-    invoices_sm3.sort(key=lambda x : x.get("number",""))
-
-    filtered = [{
-        "id": inv.get("id"),
-        "number": inv.get("number"),
-        "buyer_tax_no": inv.get("buyer_tax_no"),
-    }
-        for inv in invoices_sm3
-        if inv.get("sell_date") == today and str(inv.get('number', "")).endswith("sm3")
-    ]
-    # DEBUG ONLY
-    # for f in filtered[:5]:
-    #     print(f)
-
-    print(f"[INFO] łącznie pobrano {len(invoices_sm3)} faktur wygenerowanych dzisiaj :")
+    # filtrowanie po numerach kończących się na sm3/gs3/es3
+    suffixes = ("sm3", "gs3", "es3")
+    filtered = [inv for inv in all_invoices if str(inv.get("number", "")).lower().endswith(suffixes)]
+    logging.info("[PDF] znaleziono %s faktur z sufiksami %s", len(filtered), suffixes)
 
     out_dir = os.path.join("faktury", date.today().isoformat())
     os.makedirs(out_dir, exist_ok=True)
@@ -856,34 +921,25 @@ def get_faktur():
         number = inv.get("number") or f"id_{inv_id}"
         nip = inv.get("buyer_tax_no")
 
-        if not inv_id:
-            pobrane_faktury.append({"id": None, "path": None, "ok": False, "error": "Brak id faktury","buyer_tax_no": nip})
-            continue
-
         filename = _safe_name(f"{nip}_{number}") + ".pdf"
-        out_path = os.path.join(out_dir,filename)
-        if os.path.exists(out_path):
-            out_path = os.path.join(out_dir, f"{_safe_name(str(number))}_{inv_id}.pdf")
-
-        url = link_do_pobrania.format(invoice_id=inv_id)
+        out_path = os.path.join(out_dir, filename)
+        pdf_url = link_pdf.format(invoice_id=inv_id)
         params = {"api_token": os.getenv("API_KEY")}
 
         try:
-            with requests.get(url, params=params, timeout=60, stream=True) as r:
+            with requests.get(pdf_url, params=params, stream=True, timeout=60) as r:
                 r.raise_for_status()
                 with open(out_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
+                    for chunk in r.iter_content(8192):
                         if chunk:
                             f.write(chunk)
             logging.info("[PDF] OK: %s → %s", number, out_path)
-            pobrane_faktury.append({"id": inv_id, "path": out_path, "ok": True, "error": None,"buyer_tax_no": nip, })
+            pobrane_faktury.append({"id": inv_id, "path": out_path, "ok": True, "buyer_tax_no": nip})
         except Exception as e:
-            logging.error("[PDF] BŁĄD: %s → %s", number, e)
-            pobrane_faktury.append({"id": inv_id, "path": None, "ok": False, "error": str(e),"buyer_tax_no": nip, })
+            logging.error("[PDF] BŁĄD pobierania %s: %s", number, e)
+            pobrane_faktury.append({"id": inv_id, "path": None, "ok": False, "buyer_tax_no": nip, "error": str(e)})
 
-    # Debug ONLY
-    # print(filtered)
-    return filtered, pobrane_faktury
+    return all_invoices, pobrane_faktury
 
 def get_spolka_config(spolka: str) -> dict:
     klucz = spolka.strip().lower()
@@ -934,9 +990,9 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
 # =========================
 
 #Dodać wysyłanie samych faktur jako załącznik,
-# dodać samo wysyłanie bez generowania faktur
-# dodać opcję sprawdzania białej listy podatników
-# dodać wczytywanie i sprawdzanie listy jako drugiego pliku z listą kontrahentów
+# dodać samo wysyłanie bez generowania faktur DONE
+# dodać opcję sprawdzania białej listy podatników TO BE DONE
+# dodać wczytywanie i sprawdzanie listy jako drugiego pliku z listą kontrahentów DONE
 def czytaj_plik(
     file: str,
     *,
@@ -944,177 +1000,89 @@ def czytaj_plik(
     key: str,
     output_file: Optional[str] = None,
     send_only: bool = False,
+    invoices_only: bool = False,
     recipients_file: Optional[str] = None,
     dry_run: bool = False,
 ) -> Optional[pd.DataFrame]:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    att_dir = os.path.join(OUTPUT_DIR, f"zalaczniki_{ts}")
 
-    # 1) wczytanie głównego pliku (faktury)
+    # 1) Wczytaj główny plik (źródłowe faktury)
     df = pd.read_excel(file)
     if df is None or df.empty:
         raise ValueError("Pusty DataFrame – sprawdź plik wejściowy.")
-
-    #DEBUG ONLY
-    # print("Rozmiar dataframe przed oczyszczeniem:")
-    # przed = len(df)
-    # print(przed)
-    # df.drop_duplicates()
-    # po = len(df)
-    # print("Rozmiar dataframe po oczysczeniu")
-    # print(po)
-    #oczysczanie plików
-
-    df = handle_duplicates(df, action="drop_keep_first", report_path=os.path.join(OUTPUT_DIR, f"duplikaty_{ts}.csv"))
-
     df["NIP"] = df["NIP"].astype(str).map(_only_digits)
 
-    # załączniki CSV per NIP
-    attachments_by_nip = export_grouped_csvs(df, att_dir, encoding=OUTPUT_ENCODING)
-    attachments_by_nip = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
+    # 2) Odbiorcy (jeśli jest plik recipients)
+    rec_list = None
+    allowed_nips = None
+    if recipients_file:
+        rec_list = read_recipients_list(recipients_file)
+        if not rec_list.empty:
+            rec_list["nip_clean"] = rec_list["nip"].astype(str).map(_only_digits)
+            allowed_nips = set(rec_list["nip_clean"])
+            df["nip_clean"] = df["NIP"].astype(str).map(_only_digits)
+            df = df[df["nip_clean"].isin(allowed_nips)].copy()
+            logging.info("[INFO] Po filtrze recipients zostało %d wierszy.", len(df))
 
-    mask_empty_nip = df["NIP"].isna() | (df["NIP"].astype(str).str.strip() == "")
-    if mask_empty_nip.any():
-        out = os.path.join(OUTPUT_DIR, f"brak_nipu_{ts}.csv")
-        df.loc[mask_empty_nip].to_csv(out, index=False, encoding=OUTPUT_ENCODING)
-        logging.warning("[WARN] Pominięto %d wierszy z pustym NIP-em → %s", int(mask_empty_nip.sum()), out)
-    df = df.loc[~mask_empty_nip].copy()
-
-    # sprawdzanie statusu merchanta w bazie danych
-    # status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
-    # mask_prem = df["NIP"].astype(str).apply(
-    #     lambda nip: (status_map.get(re.sub(r"\D", "", str(nip)), "") or "").lower() == "premerchant"
-    # )
-    # if mask_prem.any():
-    #     out = os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv")
-    #     df.loc[mask_prem].to_csv(out, index=False, encoding=OUTPUT_ENCODING)
-    #     logging.warning("[WARN] Pominięto %d wierszy PREMERCHANT → %s", int(mask_prem.sum()), out)
-    # df = df.loc[~mask_prem].copy()
-
-    if df.empty:
-        logging.info("[INFO] Po filtracjach brak wierszy.")
-        return df
-
-    #DEBUG ONLY
-    # print("dane z dataframea")
-    # print(df)
-
-    # get_faktur()
-    # filtered, pobrane_faktury = get_faktur()
-    # pdf_map = build_pdf_map(pobrane_faktury)
-    # all_attach_map = combine_attachments(attachments_by_nip, pdf_map)
-
-    # 3) wczytaj plik odbiorcy (jeśli jest)
-    rec_list = read_recipients_list(recipients_file) if recipients_file else None
-    if rec_list is not None and not rec_list.empty:
-        rec_list["nip_clean"] = rec_list["nip"].apply(_only_digits)
-        df["nip_clean"] = df["NIP"].apply(_only_digits)
-    else:
-        rec_list = pd.DataFrame(columns=["nip","email","link","kontrahent","nip_clean"])
-        df["nip_clean"] = df["NIP"].apply(_only_digits)
-
-    # 4) TRYB SEND-ONLY
+    # 3) TRYB SEND-ONLY (bez faktur, tylko maile)
     if send_only:
-        recipients_df = build_recipients_send_only(df, rec_list, attachments_by_nip)
+        if rec_list is None or rec_list.empty:
+            raise ValueError("--send-only wymaga pliku --recipients z adresami email.")
+        recipients_df = build_recipients_send_only(df, rec_list, {})
         logging.info("[SEND-ONLY] Odbiorców: %d", len(recipients_df))
-
-        filtered, pobrane_faktury = get_faktur()
-        pdf_map = build_pdf_map(pobrane_faktury)
-        all_attach_map = combine_attachments(attachments_by_nip, pdf_map)
-        recipients_df["attachment_paths"] = recipients_df["nip"].map(all_attach_map)
-
         mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
-        mail_ok = sum(1 for r in mail_results if r.get("ok"))
-        mail_bad = len(mail_results) - mail_ok
-        logging.info("[MAIL] OK: %d, BŁĘDY: %d", mail_ok, mail_bad)
-
-        # podsumowanie
-        summary = {
-            "ok": mail_ok,
-            "bledy": mail_bad,
-            "razem_wiadomosci": len(mail_results),
-            "suma_netto": float(df["Netto"].sum()),
-            "suma_vat": float(df["VAT"].sum()),
-            "suma_brutto": float(df["Brutto"].sum()),
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-        if output_file:
-            base, ext = os.path.splitext(output_file)
-            if not ext:
-                ext = ".csv"
-
-            pd.DataFrame([summary]).to_csv(f"{base}_raport{ext}", index=False, encoding=OUTPUT_ENCODING)
-            logging.info("[SAVE] Raport zbiorczy: %s", f"{base}_raport{ext}")
-
-            raport_recipients, _ = build_recipients_report_only(
-                df=df,
-                recipients_df=recipients_df,
-                mail_results=mail_results,
-                attachments_by_nip=attachments_by_nip,
-                output_file=f"{base}_recipients{ext}"
-            )
-
-            recipients_df.to_csv(output_file, index=False, encoding=OUTPUT_ENCODING)
-            logging.info("[SAVE] Zapisano raport odbiorców (surowy): %s", output_file)
-
+        logging.info("[MAIL] OK: %d, BŁĘDY: %d",
+                     sum(1 for r in mail_results if r.get("ok")),
+                     sum(1 for r in mail_results if not r.get("ok")))
         return df
 
-    # 5) TRYB STANDARDOWY (Fakturownia)
-    if rec_list is not None and not rec_list.empty:
-        allowed_nips = set(rec_list["nip_clean"])
-        df = df[df["nip_clean"].isin(allowed_nips)].copy()
-        logging.info("[INFO] Po filtrze recipients zostało %d wierszy.", len(df))
-
-    rows = build_invoice_rows(df, rec_list)  # teraz rows zawiera tylko kontrahentów z recipients
+    # 4) Budowanie faktur
+    rows = build_invoice_rows(df, rec_list)
     logging.info("[INFO] Do wystawienia faktur: %d rekordów.", len(rows))
-
     wyniki = dodaj_faktury(spolka, rows)
-    ok_cnt  = sum(1 for w in wyniki if w["ok"])
+    ok_cnt = sum(1 for w in wyniki if w["ok"])
     bad_cnt = len(wyniki) - ok_cnt
     logging.info("[FAKTURY] OK: %d, BŁĘDY: %d", ok_cnt, bad_cnt)
     for w in wyniki:
         if not w["ok"]:
             logging.error("   NIP=%s → %s", w["nip"], w.get("error"))
 
-    # scal odbiorców z wynikami fakturowni
+    # 5) TRYB INVOICES-ONLY (tylko faktury, bez maili)
+    if invoices_only:
+        if recipients_file is None:
+            raise ValueError("--invoices-only wymaga pliku --recipients (żeby wiedzieć dla kogo wystawiać faktury).")
 
+        if not rows:  # nic do fakturowania
+            logging.warning("[INVOICES-ONLY] Brak kontrahentów do wystawienia faktur (po filtrze).")
+            return df
+
+        logging.info("[TRYB] Zakończono po wystawieniu faktur (bez wysyłki maili).")
+        if output_file:
+            pd.DataFrame(wyniki).to_excel(output_file, sheet_name="arkusz 1",index = False, encoding=OUTPUT_ENCODING)
+            logging.info("[SAVE] Raport faktur zapisany: %s", output_file)
+
+        return df
+
+    # 6) TRYB STANDARDOWY (faktury + wysyłka maili)
     filtered, pobrane_faktury = get_faktur()
+    xlsx_map = export_grouped_excels(df, out_dir="raporty_xlsx")
     pdf_map = build_pdf_map(pobrane_faktury)
-    all_attach_map = combine_attachments(attachments_by_nip, pdf_map)
+    all_attach_map = combine_attachments(xlsx_map, pdf_map)
 
-    recipients_df = prepare_recipients(rows, wyniki, attachments_by_nip)
+    recipients_df = prepare_recipients(rows, wyniki, {})
     recipients_df["attachment_paths"] = recipients_df["nip"].map(all_attach_map)
     mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
 
-
-    mail_ok = sum(1 for r in mail_results if r.get("ok"))
-    mail_bad = len(mail_results) - mail_ok
-    logging.info("[MAIL] OK: %d, BŁĘDY: %d", mail_ok, mail_bad)
-
-
-    # podsumowanie
-    summary = {
-        "ok": mail_ok,
-        "bledy": mail_bad,
-        "razem_wiadomosci": len(mail_results),
-        "suma_netto": float(df["Netto"].sum()),
-        "suma_vat": float(df["VAT"].sum()),
-        "suma_brutto": float(df["Brutto"].sum()),
-        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    logging.info("[MAIL] OK: %d, BŁĘDY: %d",
+                 sum(1 for r in mail_results if r.get("ok")),
+                 sum(1 for r in mail_results if not r.get("ok")))
 
     if output_file:
         base, ext = os.path.splitext(output_file)
-        pd.DataFrame([summary]).to_csv(f"{base}_raport{ext}", index=False, encoding=OUTPUT_ENCODING)
-        logging.info("[SAVE] Raport zbiorczy: %s", f"{base}_raport{ext}")
-
         pd.DataFrame(wyniki).to_csv(output_file, index=False, encoding=OUTPUT_ENCODING)
-        logging.info("[SAVE] Zapisano raport: %s", output_file)
+        logging.info("[SAVE] Raport faktur i maili: %s", output_file)
 
     return df
-
-
 
 # =========================
 # CLI
@@ -1128,13 +1096,13 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--company", required=True, choices=sorted(COMPANIES.keys()),
                         help=f"Firma (nadawca): {', '.join(sorted(COMPANIES.keys()))}")
     parser.add_argument("-o", "--output", help="Ścieżka do raportu wynikowego CSV", default=None)
-
-    # NEW:
     parser.add_argument("--send-only", action="store_true",
                         help="Wyślij maile bez generowania faktur (link może być z pliku odbiorców lub pusty).")
     parser.add_argument("--recipients", help="Plik XLSX/CSV z listą kontrahentów (NIP,email[,link][,Kontrahent]).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Nie wysyłaj przez SMTP – zapisz wiadomości jako .eml w OUTPUT_DIR/eml_debug")
+    parser.add_argument("--invoices-only", action="store_true",
+                        help="Wystawia faktury, ale nie wysyła maili.")
     args = parser.parse_args()
 
     czytaj_plik(
@@ -1143,6 +1111,7 @@ if __name__ == "__main__":
         key=args.company,
         output_file=args.output,
         send_only=args.send_only,
+        invoices_only=args.invoices_only,
         recipients_file=args.recipients,
         dry_run=args.dry_run
     )

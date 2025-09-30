@@ -30,6 +30,8 @@ from collections import defaultdict
 # Dodać cachowanie danych do pliku żeby nie palić dziennego limitu
 # zapytań do whitelisty vatowców 1/2 DONE
 # Dodać podział na dni na pliki DONE
+# Sprawdzać datę wystawienia faktury, jeśli jest ona późniejsza niż dzisiejsza data - przelew ma wyjść
+# tego samego dnia
 
 #######################
 # INSTRUKCJA OBSLUGI CLI
@@ -65,8 +67,8 @@ COMPANIES = {
     },
     "greatstore": {
         "name_addr": os.getenv("GREATSTORE_NAME_ADDR", 'Greatstore Sp. z.o.o.| aleja 1 Maja 31/33 lok. 6| 90-739 Łódź'),
-        "nrb":       os.getenv("GREATSTORE_NRB",       "18102055610000310200035501"),
-        "bank_code": os.getenv("GREATSTORE_BANK_CODE", "10205561"),
+        "nrb":       os.getenv("GREATSTORE_NRB",       "35114011080000363961001006"),
+        "bank_code": os.getenv("GREATSTORE_BANK_CODE", "11401108"),
     },
     "extrastore": {
         "name_addr": os.getenv("EXTRASTORE_NAME_ADDR", 'Extrastore Sp. z.o.o.| aleja 1 Maja 31/33 lok. 6| 90-739 Łódź'),
@@ -232,13 +234,13 @@ def validate_df(
                 "msg": f"{col_name}: nie-liczbowe/NaN"
             })
 
-    # --- ujemne wartości -> tylko LOG (nie błąd blokujący) ---
+    # --- ujemne wartości / równe zeru -> usuwanie z pliku ---
     for num_col, orig_col, tag in [
         ("_netto_num",  netto_col,  "negative_netto"),
         ("_vat_num",    vat_col,    "negative_vat"),
         ("_brutto_num", brutto_col, "negative_brutto"),
     ]:
-        mask = (d[num_col] < 0).fillna(False)
+        mask = (d[num_col] <= 0).fillna(False)
         for idx in d.index[mask]:
             error_log.append({
                 "type": tag,
@@ -324,8 +326,9 @@ def sanitize_text(text: str) -> str:
 def add_days_to_date_str(date_str: str, days: int) -> str:
     """Dodaje dni do daty (YYYYMMDD) i zwraca (YYYYMMDD)."""
     dt = datetime.strptime(date_str, "%Y%m%d")
-    dt_new = dt + timedelta(days=days)
-    return dt_new.strftime("%Y%m%d")
+    candidate = (dt + timedelta(days=days)).date()
+    today = datetime.today().date()
+    return max(candidate, today).strftime("%Y%m%d")
 
 def sanitize_nazwa_folderu(text: str) -> str:
     """Sanityzacja nazw folderów pod Windows/Unix."""
@@ -477,9 +480,9 @@ def wl_search_bank_account(bank_account_nrb: str, date_iso: str) -> dict:
         result = (data or {}).get("result") or {}
         subjects = result.get("subjects") or []
         nips = {clean_digits(s.get("nip", "")) for s in subjects if s.get("nip")}
-        return {"ok": True, "subjects": subjects, "nips": nips, "error": None}
+        return {"czynny podatnik": True, "subjects": subjects, "nips": nips, "error": None}
     except Exception as e:
-        return {"ok": False, "subjects": [], "nips": set(), "error": f"{e}"}
+        return {"nieczynny podatnik": False, "subjects": [], "nips": set(), "error": f"{e}"}
 
 
 def clean_invoice_id(s: str) -> str:
@@ -550,7 +553,7 @@ def db_execute(query: str, params: tuple):
 
 def nr_konta_z_bazy(nip: str):
     nip_num = int(nip_digits(nip))
-    rec = db_fetchone("SELECT nr_konta FROM Merchanci WHERE nip = %s", (nip_num,))
+    rec = db_fetchone("SELECT nr_konta FROM merchanci WHERE nip = %s", (nip_num,))
     if rec and rec.get("nr_konta"):
         return rec["nr_konta"]
     else:
@@ -807,6 +810,8 @@ def handle_duplicates(df: pd.DataFrame, action: str = "error") -> pd.DataFrame:
     else:
         raise ValueError(f"Nieznane action='{action}'")
 
+# używane do skracania ciągów znaków do 30
+# użycie : głónie do nazwa i adres kontrahenta
 def cut_to_30(s: str) -> str:
     if not s:
         return ""
@@ -821,6 +826,7 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
     full_dups[cols].to_csv(out_path, index=False, encoding="utf-8")
     print(f"[DUP] Raport duplikatów zapisany: {out_path}")
 
+#Używane do grupowania(agregacji) przelewów
 def _group_key(row) -> str:
     """NIP (10 cyfr) albo fallback na nazwę kontrahenta."""
     nipc = nip_digits(row.get("NIP", ""))
@@ -829,6 +835,8 @@ def _group_key(row) -> str:
     name = str(row.get("Kontrahent", "")).strip().upper()
     return f"NAME::{name}"
 
+# bezpiecznie dodaje 30 dni do daty
+# używane do dodawania
 def _safe_add30(s_min: str | None, s_max: str | None) -> str:
     base = s_max or s_min
     return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
@@ -839,14 +847,6 @@ def gr_to_pln_comma(v_gr: int) -> str:
     v = abs(v)
     return f"{sign}{v//100},{v%100:02d}"
 
-# ucina długość do 35 znaków
-def cut_to_35(str):
-    if len(str ) <=35:
-        return str
-    elif len(str) > 35:
-      return str[:35]
-    else:
-        return ""
 # ====================================
 # GŁÓWNA FUNKCJA zapisująco - tworząca
 # ====================================
@@ -929,7 +929,7 @@ def przetworz_plik_xlsx(
     export_duplicates_report(df, os.path.join(OUTPUT_DIR, f"duplikaty_{ts}.csv"))
 
     # --- weryfikacja kolumn ---
-    wymagane = {"Numer dokumentu", "Kontrahent", "NIP", "Data wpływu", "Brutto", "Netto", "VAT"}
+    wymagane = {"Numer dokumentu", "Kontrahent", "NIP", "Data wpływu", "Brutto", "Netto", "VAT","Data wystawienia"}
     brak = wymagane - set(df.columns)
     if brak:
         raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
@@ -937,7 +937,7 @@ def przetworz_plik_xlsx(
     # --- walidacja (loguj, nie wycinaj) ---
     df, error_log = validate_df(
         df,
-        date_col="Data wpływu",
+        date_col="Data wystawienia",
         netto_col="Netto",
         vat_col="VAT",
         brutto_col="Brutto",
@@ -946,8 +946,8 @@ def przetworz_plik_xlsx(
     )
     export_error_log(error_log, os.path.join(OUTPUT_DIR, f"errors_{ts}.csv"))
 
-    # --- ujemne kwoty do raportu i out ---
-    mask_negative = (df["Netto"] < 0) | (df["VAT"] < 0) | (df["Brutto"] < 0)
+    # --- ujemne kwoty do raportu i outputu ---
+    mask_negative = (df["Netto"] <= 0) | (df["VAT"] <= 0) | (df["Brutto"] <= 0)
     if mask_negative.any():
         print(f"[WARN] Pomijam {int(mask_negative.sum())} wierszy z ujemnymi kwotami (zapisano raport).")
         df.loc[mask_negative].to_csv(os.path.join(OUTPUT_DIR, f"ujemne_{ts}.csv"), index=False, encoding="utf-8-sig")
@@ -958,27 +958,30 @@ def przetworz_plik_xlsx(
         print("[INFO] Po filtracji brak poprawnych wierszy.")
         return
 
-    # --- odfiltrowanie PREMERCHANT z DB ---
-    status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
-    mask_prem = df["NIP"].astype(str).apply(
-        lambda nip: (status_map.get(re.sub(r"\D", "", str(nip)), "") or "").lower() == "premerchant"
-    )
-    if mask_prem.any():
-        print(f"[WARN] Pomijam {int(mask_prem.sum())} wierszy od kontrahentów PREMERCHANT (zapisano raport).")
-        df.loc[mask_prem].to_csv(os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv"), index=False, encoding="utf-8-sig")
-    df = df.loc[~mask_prem].copy()
-    if df.empty:
-        with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
-            f.write("")
-        print("[INFO] Po filtracji brak poprawnych wierszy (po PREMERCHANT).")
-        return
+    # # --- odfiltrowanie PREMERCHANT z DB ---
+    # status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
+    # mask_prem = df["NIP"].astype(str).apply(
+    #     lambda nip: (status_map.get(re.sub(r"\D", "", str(nip)), "") or "").lower() == "premerchant"
+    # )
+    # if mask_prem.any():
+    #     print(f"[WARN] Pomijam {int(mask_prem.sum())} wierszy od kontrahentów PREMERCHANT (zapisano raport).")
+    #     df.loc[mask_prem].to_csv(os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv"), index=False, encoding="utf-8-sig")
+    # df = df.loc[~mask_prem].copy()
+    # if df.empty:
+    #     with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
+    #         f.write("")
+    #     print("[INFO] Po filtracji brak poprawnych wierszy (po PREMERCHANT).")
+    #     return
 
     # --- kolumny pomocnicze ---
+
+
     df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
     df["__vat_gr"]    = df["VAT"].apply(money_to_grosze)
     df["__netto_gr"]  = df["Netto"].apply(money_to_grosze)
-    df["__data_str"]  = df["Data wpływu"].apply(serializacja_dat)  # YYYYMMDD
+    df["__data_str"]  = df["Data wystawienia"].apply(serializacja_dat)  # YYYYMMDD
     df["__nip_clean"] = df["NIP"].astype(str).str.replace(r"\D", "", regex=True)
+    df["__nip_two"] = df["NIP"]
 
     # klucz grupowania: NIP(10) albo fallback NAME::
     df["__grp_key"] = df.apply(
@@ -1020,9 +1023,45 @@ def przetworz_plik_xlsx(
         raise RuntimeError(f"Brakuje kolumn w 'agg': {missing}")
 
     # --- (opcjonalnie) raport zbiorczy ---
+    # if merged_csv:
+    #     agg.to_csv(merged_csv, index=False, encoding="utf-8-sig")
+    #     print(f"[RAPORT] Zapisano raport scalonych grup: {merged_csv}")
+
     if merged_csv:
-        agg.to_csv(merged_csv, index=False, encoding="utf-8-sig")
-        print(f"[RAPORT] Zapisano raport scalonych grup: {merged_csv}")
+        # Bezpieczna serializacja "Data wpływu" -> YYYYMMDD
+        def _safe_yyyymmdd(val):
+            try:
+                return serializacja_dat(val)
+            except Exception:
+                return None
+
+        df_rep = df.copy()
+        # Data wpływu jako string YYYYMMDD do grupowania
+        df_rep["__wplyw_str"] = df_rep["Data wpływu"].map(_safe_yyyymmdd)
+        # NIP oczyszczony z niedozwolonych znaków (10 cyfr albo pusty)
+        df_rep["__nip_clean"] = df_rep["NIP"].astype(str).str.replace(r"\D", "", regex=True)
+
+        # Tylko wiersze z poprawną datą wpływu
+        df_rep = df_rep.loc[df_rep["__wplyw_str"].notna()].copy()
+
+        # Agregacja po: Data wpływu, NIP, Kontrahent
+        # Sumujemy na groszach, potem konwertujemy do PLN z 2 miejscami.
+        raport = (
+            df_rep.groupby(["__wplyw_str", "__nip_clean", "Kontrahent"], as_index=False)
+            .agg(Suma_Brutto_gr=("__brutto_gr", "sum"))
+        )
+
+        # Format daty w raporcie jako YYYY-MM-DD (czytelniejsze) i kolumny wyjściowe w żądanej kolejności
+        raport["Data wpływu"] = pd.to_datetime(raport["__wplyw_str"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
+        raport["NIP"] = raport["__nip_clean"]
+        raport["Kontrahent"] = raport["Kontrahent"]
+        raport["Kwota Brutto"] = (raport["Suma_Brutto_gr"] / 100).round(2)
+
+        raport = raport[["Data wpływu", "NIP", "Kontrahent", "Kwota Brutto"]].sort_values(
+            ["Data wpływu", "NIP", "Kontrahent"])
+
+        raport.to_csv(merged_csv, index=False, encoding="utf-8-sig")
+        print(f"[RAPORT] zapisany raport do pliku: {merged_csv}")
 
     # --- PREFETCH WL: NIP -> NRB (DB) oraz batch /search/bank-account/{NRB} ---
     valid_nips = sorted({
@@ -1039,25 +1078,27 @@ def przetworz_plik_xlsx(
 
     # budujemy jednorazowe zapytania WL per (NRB, data)
     accounts_to_query: set[tuple[str, str]] = set()
+    unique_nrbs: set[str] = set()
+
     for _, r in agg.iterrows():
         nip = str(r["nip_clean"] or "")
         if nip.isdigit() and len(nip) == 10:
-            nrb = nip_to_nrb.get(nip, "0"*26)
-            if nrb and nrb != "0"*26:
-                date_iso = wl_api_iso_date_from_yyyymmdd(r["__data_str"])
-                accounts_to_query.add((nrb, date_iso))
+            nrb = nip_to_nrb.get(nip, "0" * 26)
+            if nrb and nrb != "0" * 26:
+                unique_nrbs.add(nrb)
 
     wl_acc_map: dict[tuple[str, str], set[str]] = {}   # (nrb, date_iso) set(NIP)
-    # odkomentowąc jutro na dzisiaj koniec free testów
-    # if wl_check:
-    #     for (nrb, date_iso) in sorted(accounts_to_query):
-    #         res = wl_search_bank_account(nrb, date_iso)
-    #         if not res["ok"]:
-    #             print(f"[WL][ACC][ERR] NRB={nrb} date={date_iso}: {res['error']}")
-    #             wl_acc_map[(nrb, date_iso)] = set()
-    #         else:
-    #             wl_acc_map[(nrb, date_iso)] = res["nips"]
-    #             print(f"[WL][ACC] NRB={nrb} date={date_iso} -> NIPy={len(res['nips'])}")
+    #date_iso = datetime.today().isoformat("%Y-%m-%d")
+    # ewentualne błędy : to format daty
+    if wl_check:
+        for (nrb, date_iso) in sorted(accounts_to_query):
+            res = wl_search_bank_account(nrb, date_iso)
+            if not res["ok"]:
+                print(f"[WL][ACC][ERR] NRB={nrb} date={date_iso}: {res['error']}")
+                wl_acc_map[(nrb, date_iso)] = set()
+            else:
+                wl_acc_map[(nrb, date_iso)] = res["nips"]
+                print(f"[WL][ACC] NRB={nrb} date={date_iso} -> NIPy={len(res['nips'])}")
 
     # licznik/log WL
     wl_cnt_assigned = wl_cnt_unassigned = wl_cnt_skipped = 0
@@ -1199,9 +1240,9 @@ def przetworz_plik_xlsx(
 
     total_saved = 0
     for day_key, day_lines in sorted(lines_by_day.items()):
-        data_wplywu    = day_key
+        data_wystawienia    = day_key
         data_platnosci = _safe_add30(day_key, day_key)
-        out_name = f"{key}_przelewy_w_{_ddmmyy(data_wplywu)}_p_{_ddmmyy(data_platnosci)}.txt"
+        out_name = f"{key}_przelewy_w_{_ddmmyy(data_wystawienia)}_p_{_ddmmyy(data_platnosci)}.txt"
         out_day_path = os.path.join(base_dir, out_name)
 
         # kontrola znaków (opcjonalna)

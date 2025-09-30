@@ -11,7 +11,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-## WERSJA NIEDOKOŃCZONA
 
 # TODO
 # zapis do pliku txt i kopia w excellu (DONE)
@@ -155,7 +154,7 @@ def nr_konta_z_bazy(nip):
     try:
         with psycopg2.connect(**DB_CONFIG) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT nr_konta FROM merchant WHERE nip = %s", (str(nip),))
+                cursor.execute("SELECT nr_konta FROM merchanci WHERE nip = s", (nip,))
                 row = cursor.fetchone()
         return row[0] if row else None
     except psycopg2.Error as e:
