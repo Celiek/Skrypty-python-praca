@@ -100,8 +100,8 @@ COMPANIES = {
         "name" : os.getenv("NAZWA","SHUMEE"),
         "nrb": os.getenv("SHUMEE_NRB", "07114011080000314718001007"),
         "bank_code": os.getenv("SHUMEE_BANK_CODE", "11401108"),
-        "email": os.getenv("SHUMEE_EMAIL", "faktury@shumee.pl"),
-        "server_host":os.getenv("SHUMEE_SERVER_HOST", "imap.serwer1694120.home.pl"),
+        "email": os.getenv("SHUMEE_EMAIL", "faktury@sm.base.com"),
+        "server_host":os.getenv("SHUMEE_SERVER_HOST", "smtp.gmail.com"),
         "kontakt":os.getenv("SHUMEE_KONTAKT", "kontakt@shumee.pl"),
         "password":os.getenv("SHUMEE_PASS"),
     },
@@ -110,9 +110,9 @@ COMPANIES = {
         "name" : os.getenv("NAZWA","GREATSTORE"),
         "nrb": os.getenv("GREATSTORE_NRB", "18102055610000310200035501"),
         "bank_code": os.getenv("GREATSTORE_BANK_CODE", "10205561"),
-        "email": os.getenv("SHUMEE_EMAIL", "faktury@greatstore.pl"),
-        "server_host":os.getenv("GREAT_SERVER_HOST", "imap.serwer1694120.home.pl"),
-        "kontakt": os.getenv("SHUMEE_KONTAKT", "kontakt@greatstore.pl"),
+        "email": os.getenv("GREATSTORE_EMAIL", "faktury@greatstore.pl"),
+        "server_host":os.getenv("GREATSTORE_SERVER_HOST", "smtp.gmail.com"),
+        "kontakt": os.getenv("GREATSTORE_KONTAKT", "kontakt@greatstore.pl"),
         "password":os.getenv("GREATSTORE_PASS"),
     },
     "extrastore": {
@@ -120,9 +120,9 @@ COMPANIES = {
         "name" : os.getenv("NAZWA","EXTRASTORE"),
         "nrb": os.getenv("EXTRASTORE_NRB", "05114020040000330280429939"),
         "bank_code": os.getenv("EXTRASTORE_BANK_CODE", "11402004"),
-        "email": os.getenv("SHUMEE_EMAIL", "faktury_extra@shumee.pl"),
-        "server_host":os.getenv("EXTRA_SERVER_HOST", "imap.serwer1694120.home.pl"),
-        "kontakt": os.getenv("SHUMEE_KONTAKT", "kontakt@extrastore.pl"),
+        "email": os.getenv("EXTRASTORE_EMAIL", "faktury_extra@shumee.pl"),
+        "server_host":os.getenv("EXTRASTORE_SERVER_HOST", "smtp.gmail.com"),
+        "kontakt": os.getenv("EXTRASTORE_KONTAKT", "kontakt@extrastore.pl"),
         "password":os.getenv("EXTRASTORE_PASS"),
     },
 }
@@ -193,7 +193,7 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     if not s:
         s = "plik"
 
-    # unikamy nazw zarezerwowanych (bez rozszerzenia)
+
     base_upper = s.upper()
     if base_upper in _WINDOWS_RESERVED:
         s = f"_{s}"
@@ -227,9 +227,18 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
             pd.to_numeric(sub["Netto"], errors="coerce").fillna(0) * 0.03
         ).round(2)
 
-        # 🔹 suma prowizji dla całego arkusza
+        # suma prowizji tylko w pierwszym wierszu
         suma_prowizji = sub["Prowizja_3proc"].sum().round(2)
-        sub["Suma_prowizji"] = suma_prowizji
+        sub["Suma_prowizji"] = ""
+        if not sub.empty:
+            sub.loc[sub.index[0], "Suma_prowizji"] = suma_prowizji
+
+        # Zamiana liczb na stringi z przecinkiem ( inaczej nie da się tego tak łatwo obejść)
+        for col in ["Netto", "VAT", "Brutto", "Prowizja_3proc", "Suma_prowizji"]:
+            if col in sub.columns:
+                sub[col] = sub[col].apply(
+                    lambda x: str(x).replace(".", ",") if pd.notna(x) and x != "" else ""
+                )
 
         fname = f"{nip_str}_{_slugify_filename(kontrahent)}.xlsx"
         fpath = os.path.join(out_dir, fname)
@@ -239,7 +248,6 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
         out_map[nip_str] = os.path.abspath(fpath)
 
     return out_map
-
 
 
 def prepare_recipients(rows_from_build: List[Dict], wyniki_faktur: List[Dict], attachments_by_nip: Dict[str, str]) -> pd.DataFrame:
@@ -685,7 +693,7 @@ def send_Email(spolka: str,
                 logging.warning("[SKIP] %s pominięty – brak linku do faktury", email_to)
                 continue
 
-            # 1) Złóż wiadomość (root = mixed)
+            # składanie wiadomości
             html_body = render_email_html(invoice_link, company_name)
             msg = MIMEMultipart()  # mixed
             msg["Subject"] = subject
@@ -1058,7 +1066,7 @@ def czytaj_plik(
 
         logging.info("[TRYB] Zakończono po wystawieniu faktur (bez wysyłki maili).")
         if output_file:
-            pd.DataFrame(wyniki).to_excel(output_file, sheet_name="arkusz 1",index = False, encoding=OUTPUT_ENCODING)
+            pd.DataFrame(wyniki).to_excel(output_file, sheet_name="arkusz 1",index = False, encoding=OUTPUT_ENCODING,decimal=",")
             logging.info("[SAVE] Raport faktur zapisany: %s", output_file)
 
         return df
