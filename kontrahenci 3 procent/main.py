@@ -185,8 +185,8 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     s = re.sub(r"[^A-Za-z0-9_. \-]", "_", s)
 
     # zwijanie wielokrotnych podkreślników/spacji
-    s = re.sub(r"[ _]+", " ", s)      # najpierw łączymy w pojedyncze spacje
-    s = s.replace(" ", "_")           # potem spacje -> podkreślniki
+    s = re.sub(r"[ _]+", " ", s)
+    s = s.replace(" ", "_")
     s = re.sub(r"_+", "_", s)
 
     # usunięcie kropek/spacji/podkreślników z początku/końca
@@ -219,6 +219,7 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
 
     out_map: dict[str, str] = {}
     g = df.groupby("NIP", dropna=False, as_index=False)
+
     for nip, sub in g:
         nip_str = str(nip).strip()
         kontrahent = ""
@@ -230,13 +231,11 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
             pd.to_numeric(sub["Netto"], errors="coerce").fillna(0) * 0.03
         ).round(2)
 
-        # suma prowizji tylko w pierwszym wierszu
+        # 🔹 suma prowizji — w każdej linii tej samej wartości
         suma_prowizji = sub["Prowizja_3proc"].sum().round(2)
-        sub["Suma_prowizji"] = ""
-        if not sub.empty:
-            sub.loc[sub.index[0], "Suma_prowizji"] = suma_prowizji
+        sub["Suma_prowizji"] = suma_prowizji
 
-        # Zamiana liczb na stringi z przecinkiem ( inaczej nie da się tego tak łatwo obejść)
+        # 🔹 Zamiana kropek na przecinki (format PL)
         for col in ["Netto", "VAT", "Brutto", "Prowizja_3proc", "Suma_prowizji"]:
             if col in sub.columns:
                 sub[col] = sub[col].apply(
@@ -250,24 +249,7 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
             fpath, index=False, sheet_name="Faktury"
         )
         out_map[nip_str] = os.path.abspath(fpath)
-
-        try:
-            wb = load_workbook(fpath)
-            ws = wb["Faktury"]
-
-            last_row = ws.max_row + 1
-            col_letter = get_column_letter(7)  # kolumna G = 7
-
-            ws[f"{col_letter}{last_row}"] = f"=SUM({col_letter}2:{col_letter}{last_row - 1})"
-            ws[f"{col_letter}{last_row}"].number_format = "0.00"
-
-            ws[f"F{last_row}"] = "SUMA PROWIZJI →"
-
-            wb.save(fpath)
-            wb.close()
-            logging.info("[XLSX] Dodano sumę prowizji w pliku: %s", fpath)
-        except Exception as e:
-            logging.warning("[XLSX] Nie udało się dodać sumy prowizji w %s: %s", fpath, e)
+        logging.info("[XLSX] Zapisano raport kontrahenta: %s", fpath)
 
     return out_map
 
@@ -807,7 +789,8 @@ def build_recipients_send_only(df: pd.DataFrame,
 
 
 
-def dodaj_faktury(spolka: str, items: List[Dict]) -> List[Dict]:
+def dodaj_faktury(spolka: str, items: List[Dict], sell_date: Optional[str] = None) -> List[Dict]:
+
     if spolka not in DEPARTMENT_ID:
         raise ValueError(f"Nieznana spółka: {spolka}")
     dept_id = DEPARTMENT_ID[spolka]
@@ -830,8 +813,8 @@ def dodaj_faktury(spolka: str, items: List[Dict]) -> List[Dict]:
                 "invoice": {
                     "kind": "vat",
                     "number": None,
-                    "sell_date":  today.strftime("%Y-%m-%d"), # skorygować
-                    "issue_date": today.strftime("%Y-%m-%d"), # skorygować
+                    "sell_date":  (sell_date or today.strftime("%Y-%m-%d")),
+                    "issue_date": today.strftime("%Y-%m-%d"),
                     "payment_to": payment_to.strftime("%Y-%m-%d"),
                     "buyer_name":   it["buyer_name"],
                     "buyer_tax_no": it["buyer_tax_no"],
@@ -1031,6 +1014,7 @@ def czytaj_plik(
     invoices_only: bool = False,
     recipients_file: Optional[str] = None,
     dry_run: bool = False,
+    sell_date: Optional[str] = None,   # 🔹 nowy parametr
 ) -> Optional[pd.DataFrame]:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1067,7 +1051,7 @@ def czytaj_plik(
     # 4) Budowanie faktur
     rows = build_invoice_rows(df, rec_list)
     logging.info("[INFO] Do wystawienia faktur: %d rekordów.", len(rows))
-    wyniki = dodaj_faktury(spolka, rows)
+    wyniki = dodaj_faktury(spolka, rows, sell_date=sell_date)
     ok_cnt = sum(1 for w in wyniki if w["ok"])
     bad_cnt = len(wyniki) - ok_cnt
     logging.info("[FAKTURY] OK: %d, BŁĘDY: %d", ok_cnt, bad_cnt)
@@ -1147,6 +1131,7 @@ if __name__ == "__main__":
     parser.add_argument("--recipients", help="Plik XLSX/CSV z listą kontrahentów (NIP,email[,link][,Kontrahent]).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Nie wysyłaj przez SMTP – zapisz wiadomości jako .eml w OUTPUT_DIR/eml_debug")
+    parser.add_argument("--sell-date", help="Data sprzedaży (YYYY-MM-DD) przekazywana do API Fakturownia", default=None)
     parser.add_argument("--invoices-only", action="store_true",
                         help="Wystawia faktury, ale nie wysyła maili.")
     args = parser.parse_args()
@@ -1159,7 +1144,9 @@ if __name__ == "__main__":
         send_only=args.send_only,
         invoices_only=args.invoices_only,
         recipients_file=args.recipients,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        sell_date=args.sell_date
     )
 
 # python main.py dane.xlsx -c shumee --invoices-only
+# --sell-date 2025-09-30
