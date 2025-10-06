@@ -13,6 +13,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Dict, Tuple, Optional
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 import pandas as pd
 import psycopg2
@@ -20,22 +22,23 @@ import requests
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
+import csv
 
 # TODO
 # Dodać wykorzystanie bazy danych do wyszukiwania fakturowania kontrahentów
-# Dodać opcję zapisu faktur od kontrahentów do bazy danych
+# Dodać opcję zapisu faktur od kontrahentów do bazy danychq
 
 #dodać logowanie duplikatów DONE
 
 # zmienić nazwę pozycji DONE
-# zmienić nazwę spółki
-# zmienić treść
-# tytuł : Faktura prowizyjna 3% od sprzedanych faktur - spółka supermerchant s.p.a
-# zmienić nagłówek wiadomości : Prowizja 3% od sprzedanych towarów
+# zmienić nazwę spółki DONE
+# zmienić treść DONE
+# tytuł : Faktura prowizyjna 3% od sprzedanych faktur - spółka supermerchant s.p.a DONE
+# zmienić nagłówek wiadomości : Prowizja 3% od sprzedanych towarów DONE
 # zmiana numeru faktury DONE
 # nie faktury tylko dokumenty księgowe DONE
 # usunąć logo DONE
-# dodac tryb tylko wystaw faktury
+# dodac tryb tylko wystaw faktury DONE
 
 
 # =========================
@@ -242,10 +245,29 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
 
         fname = f"{nip_str}_{_slugify_filename(kontrahent)}.xlsx"
         fpath = os.path.join(out_dir, fname)
+
         sub[cols + ["Prowizja_3proc", "Suma_prowizji"]].to_excel(
             fpath, index=False, sheet_name="Faktury"
         )
         out_map[nip_str] = os.path.abspath(fpath)
+
+        try:
+            wb = load_workbook(fpath)
+            ws = wb["Faktury"]
+
+            last_row = ws.max_row + 1
+            col_letter = get_column_letter(7)  # kolumna G = 7
+
+            ws[f"{col_letter}{last_row}"] = f"=SUM({col_letter}2:{col_letter}{last_row - 1})"
+            ws[f"{col_letter}{last_row}"].number_format = "0.00"
+
+            ws[f"F{last_row}"] = "SUMA PROWIZJI →"
+
+            wb.save(fpath)
+            wb.close()
+            logging.info("[XLSX] Dodano sumę prowizji w pliku: %s", fpath)
+        except Exception as e:
+            logging.warning("[XLSX] Nie udało się dodać sumy prowizji w %s: %s", fpath, e)
 
     return out_map
 
@@ -271,9 +293,7 @@ def prepare_recipients(rows_from_build: List[Dict], wyniki_faktur: List[Dict], a
 
     # dołącz ścieżkę do CSV
     out["attachment_path"] = out["nip"].map(attachments_by_nip).fillna("")
-    #DEBUG ONLY
-    # print("odbiorcy lista:")
-    # print(out)
+
     return out
 
 def render_email_html(invoice_link: Optional[str], company_name: str) -> str:
@@ -453,7 +473,7 @@ def build_recipients_report_only(df, recipients_df, mail_results, attachments_by
     df["NIP_clean"] = df["NIP"].astype(str).map(_only_digits)
     recipients_df["nip_clean"] = recipients_df["nip"].astype(str).map(_only_digits)
 
-    # 2agregacja po nipie
+    # 2 agregacja po nipie
     recipients_unique = (
         recipients_df
         .sort_values(["nip_clean", "email"])              # deterministycznie
@@ -539,7 +559,7 @@ def lista_faktur_sm3() -> List[dict]:
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
-    return [f for f in data if str(f.get("number", "")).endswith("/sm3")]
+    return [f for f in data if str(f.get("number", "")).endswith("/SM","/GS","/EX")]
 
 def _to_decimal(val: str) -> Decimal:
     """Konwersja string/liczby na Decimal z kropką jako separatorem."""
@@ -608,7 +628,6 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
     print("================================")
 
     return rows
-
 
 def get_invoice_public_url(invoice_id: int, api_key: str) -> Optional[str]:
     """
@@ -811,8 +830,8 @@ def dodaj_faktury(spolka: str, items: List[Dict]) -> List[Dict]:
                 "invoice": {
                     "kind": "vat",
                     "number": None,
-                    "sell_date":  today.strftime("%Y-%m-%d"),
-                    "issue_date": today.strftime("%Y-%m-%d"),
+                    "sell_date":  today.strftime("%Y-%m-%d"), # skorygować
+                    "issue_date": today.strftime("%Y-%m-%d"), # skorygować
                     "payment_to": payment_to.strftime("%Y-%m-%d"),
                     "buyer_name":   it["buyer_name"],
                     "buyer_tax_no": it["buyer_tax_no"],
@@ -916,8 +935,8 @@ def get_faktur():
         page += 1
 
     # filtrowanie po numerach kończących się na sm3/gs3/es3
-    suffixes = ("sm3", "gs3", "es3")
-    filtered = [inv for inv in all_invoices if str(inv.get("number", "")).lower().endswith(suffixes)]
+    suffixes = ("SM", "GS", "EX")
+    filtered = [inv for inv in all_invoices if str(inv.get("number", "")).endswith(suffixes)]
     logging.info("[PDF] znaleziono %s faktur z sufiksami %s", len(filtered), suffixes)
 
     out_dir = os.path.join("faktury", date.today().isoformat())
@@ -927,9 +946,10 @@ def get_faktur():
     for inv in filtered:
         inv_id = inv.get("id")
         number = inv.get("number") or f"id_{inv_id}"
+        kontrahent = inv.get("buyer_name")
         nip = inv.get("buyer_tax_no")
 
-        filename = _safe_name(f"{nip}_{number}") + ".pdf"
+        filename = _safe_name(f"{kontrahent}_{nip}_{number}") + ".pdf"
         out_path = os.path.join(out_dir, filename)
         pdf_url = link_pdf.format(invoice_id=inv_id)
         params = {"api_token": os.getenv("API_KEY")}
@@ -963,7 +983,7 @@ def combine_attachments(csv_map: dict[str, str], pdf_map: dict[str, list[str]]) 
     out = {}
     for nip in all_nips:
         files = []
-        if csv_map.get(nip):         # pojedyncza ścieżka CSV z Twojej funkcji export_grouped_csvs
+        if csv_map.get(nip):
             files.append(csv_map[nip])
         files.extend(pdf_map.get(nip, []))
         out[nip] = files
@@ -997,9 +1017,9 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
 # Główna logika
 # =========================
 
-#Dodać wysyłanie samych faktur jako załącznik,
+#Dodać wysyłanie samych faktur jako załącznik DONE
 # dodać samo wysyłanie bez generowania faktur DONE
-# dodać opcję sprawdzania białej listy podatników TO BE DONE
+# dodać opcję sprawdzania białej listy podatników DONE po stronie bazy danych
 # dodać wczytywanie i sprawdzanie listy jako drugiego pliku z listą kontrahentów DONE
 def czytaj_plik(
     file: str,
@@ -1056,39 +1076,38 @@ def czytaj_plik(
             logging.error("   NIP=%s → %s", w["nip"], w.get("error"))
 
     # 5) TRYB INVOICES-ONLY (tylko faktury, bez maili)
-    # 5) TRYB INVOICES-ONLY (tylko faktury, bez maili)
     if invoices_only:
-        os.environ["INVOICES_ONLY"] = "1"  # 🔹 ustaw tryb globalny, żeby send_Email wiedział, że ma pominąć SMTP
+        os.environ["INVOICES_ONLY"] = "1"
 
-        if recipients_file is None:
-            raise ValueError("--invoices-only wymaga pliku --recipients (żeby wiedzieć dla kogo wystawiać faktury).")
-
-        if not rows:  # nic do fakturowania
+        if not rows:
             logging.warning("[INVOICES-ONLY] Brak kontrahentów do wystawienia faktur (po filtrze).")
             return df
 
-        logging.info("[TRYB] Zakończono po wystawieniu faktur (bez wysyłki maili).")
+        logging.info("[INVOICES-ONLY] Wystawiono faktury – pobieram PDF-y z Fakturowni...")
+
+        # pobiera wystawione faktury z fakturowni
+        all_invoices, pobrane_faktury = get_faktur()
+        pdf_map = build_pdf_map(pobrane_faktury)
+
+        logging.info("[INVOICES-ONLY] Pobrano %d faktur PDF, zapisano w folderze 'faktury/'.", len(pdf_map))
+
+        # budowanie raportu per kontrahent
+        raport_dir = "raporty_xlsx"
+        xlsx_map = export_grouped_excels(df, out_dir=raport_dir)
+        logging.info("[EXPORT] Zapisano raporty kontrahentów do folderu: %s", raport_dir)
+
+        all_attach_map = combine_attachments(xlsx_map, pdf_map)
+
+        # zapis raportu zbiorczego
         if output_file:
-            pd.DataFrame(wyniki).to_excel(
-                output_file,
-                sheet_name="arkusz 1",
-                index=False,
-                encoding=OUTPUT_ENCODING,
-                decimal=","
-            )
-            logging.info("[SAVE] Raport faktur zapisany: %s", output_file)
+            base, ext = os.path.splitext(output_file)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = f"{base}_{timestamp}{ext or '.xlsx'}"
+            pd.DataFrame(wyniki).to_excel(out_path, index=False)
+            logging.info("[SAVE] Raport faktur zapisany: %s", out_path)
 
+        logging.info("[TRYB] Zakończono po wystawieniu i pobraniu faktur (bez wysyłki maili).")
         return df
-
-    # 6) TRYB STANDARDOWY (faktury + wysyłka maili)
-    filtered, pobrane_faktury = get_faktur()
-    xlsx_map = export_grouped_excels(df, out_dir="raporty_xlsx")
-    pdf_map = build_pdf_map(pobrane_faktury)
-    all_attach_map = combine_attachments(xlsx_map, pdf_map)
-
-    recipients_df = prepare_recipients(rows, wyniki, {})
-    recipients_df["attachment_paths"] = recipients_df["nip"].map(all_attach_map)
-    mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
 
     # 6) TRYB STANDARDOWY (faktury + wysyłka maili)
     filtered, pobrane_faktury = get_faktur()
