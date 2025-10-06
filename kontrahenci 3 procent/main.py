@@ -1056,7 +1056,10 @@ def czytaj_plik(
             logging.error("   NIP=%s → %s", w["nip"], w.get("error"))
 
     # 5) TRYB INVOICES-ONLY (tylko faktury, bez maili)
+    # 5) TRYB INVOICES-ONLY (tylko faktury, bez maili)
     if invoices_only:
+        os.environ["INVOICES_ONLY"] = "1"  # 🔹 ustaw tryb globalny, żeby send_Email wiedział, że ma pominąć SMTP
+
         if recipients_file is None:
             raise ValueError("--invoices-only wymaga pliku --recipients (żeby wiedzieć dla kogo wystawiać faktury).")
 
@@ -1066,10 +1069,26 @@ def czytaj_plik(
 
         logging.info("[TRYB] Zakończono po wystawieniu faktur (bez wysyłki maili).")
         if output_file:
-            pd.DataFrame(wyniki).to_excel(output_file, sheet_name="arkusz 1",index = False, encoding=OUTPUT_ENCODING,decimal=",")
+            pd.DataFrame(wyniki).to_excel(
+                output_file,
+                sheet_name="arkusz 1",
+                index=False,
+                encoding=OUTPUT_ENCODING,
+                decimal=","
+            )
             logging.info("[SAVE] Raport faktur zapisany: %s", output_file)
 
         return df
+
+    # 6) TRYB STANDARDOWY (faktury + wysyłka maili)
+    filtered, pobrane_faktury = get_faktur()
+    xlsx_map = export_grouped_excels(df, out_dir="raporty_xlsx")
+    pdf_map = build_pdf_map(pobrane_faktury)
+    all_attach_map = combine_attachments(xlsx_map, pdf_map)
+
+    recipients_df = prepare_recipients(rows, wyniki, {})
+    recipients_df["attachment_paths"] = recipients_df["nip"].map(all_attach_map)
+    mail_results = send_Email(spolka, recipients_df, subject=None, dry_run=dry_run)
 
     # 6) TRYB STANDARDOWY (faktury + wysyłka maili)
     filtered, pobrane_faktury = get_faktur()
@@ -1124,3 +1143,4 @@ if __name__ == "__main__":
         dry_run=args.dry_run
     )
 
+# python main.py dane.xlsx -c shumee --invoices-only
