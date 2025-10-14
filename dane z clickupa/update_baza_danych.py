@@ -6,7 +6,8 @@ from sqlalchemy.dialects.postgresql import insert
 from dotenv import load_dotenv
 import os
 
-# Kod na podstawie różnic pomiędzy bazą danych a plikiem xlsx 
+# Aktualizacja bazy danych, dane z clickupa pobiera i zapisuje w merchanci_staging
+# różnicę między merchanci_staging a tabelą merchanci zapisuje w tabeli merchanci 
 # różnice zapisuje w pliku i przechowuje w pamięci
 # tą "różnicę" następnie zapisuje w bazie danych     
 # kod wymaga pliku z clickupa do działania ze zmienioną nazwą 2 giej kolumy

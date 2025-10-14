@@ -1,16 +1,24 @@
+import hashlib
+import json
+import logging
 import os
 import random
 import re
+import shutil
+import string
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections import Counter
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Dict, List
 
 import pandas as pd
 import psycopg2
+import py7zr
 import requests
 import unicodedata
 from dotenv import load_dotenv
@@ -19,19 +27,22 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from collections import defaultdict
-
 
 # TODO
 # Dodać nie branie pod uwagę faktur testowych - Status PREMERCHANT  DONE
 # Zmiana nazwy plkiku na kolumne 17 elixir DONE
 # ujemne pozycje nie mogą być uwzględnianie w agregacji faktur DONE
 # zmienić agregację przelewów po nipie i dacie DONE
-# Dodać cachowanie danych do pliku żeby nie palić dziennego limitu
-# zapytań do whitelisty vatowców 1/2 DONE
 # Dodać podział na dni na pliki DONE
 # Sprawdzać datę wystawienia faktury, jeśli jest ona późniejsza niż dzisiejsza data - przelew ma wyjść
-# tego samego dnia
+# tego samego dnia DONE
+
+# TODO 2:
+# zmienić zapis przelewów do podfolderów DONE
+# dodać kod sprawdzający czy kontrahent jest na białęj liscie DONE
+# dodać generowanie raportów ( do wysyłki emailem do kontrahenta) 1/2 DONE
+# ogarnąć formatownaie daty jako nr dokumentu
+
 
 #######################
 # INSTRUKCJA OBSLUGI CLI
@@ -82,6 +93,13 @@ CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", r"C:\tools\chromedriver-win64
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", ".")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+_WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
+_WINDOWS_RESERVED  = {
+    "CON","PRN","AUX","NUL",
+    *(f"COM{i}" for i in range(1,10)),
+    *(f"LPT{i}" for i in range(1,10)),
+}
+
 # Domyślnie ISO-8859-2 (lub nadpisz w .env)
 OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
 
@@ -91,70 +109,6 @@ OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
 
 # --- WALIDACJA DANYCH ---
 
-def wl_api_iso_date_from_yyyymmdd(yyyymmdd: str | None) -> str:
-    """Zamienia YYYYMMDD -> YYYY-MM-DD; gdy brak/niepoprawne, zwraca dzisiejszą."""
-    try:
-        if yyyymmdd:
-            return datetime.strptime(yyyymmdd, "%Y%m%d").strftime("%Y-%m-%d")
-    except Exception:
-        pass
-    return datetime.now().strftime("%Y-%m-%d")
-
-# TODO
-def wl_search_nip(nip: str, date_iso: str) -> dict:
-    """
-    GET https://wl-api.mf.gov.pl/api/search/nip/{nip}?date=YYYY-MM-DD
-    Zwraca: {"ok": bool, "status": str|None, "subject": dict|None, "error": str|None}
-    """
-    url = f"https://wl-api.mf.gov.pl/api/search/nip/{nip}?date={date_iso}"
-    try:
-        r = requests.get(url, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        return {"ok": False, "status": None, "subject": None, "error": f"HTTP/parse: {e}"}
-
-    # Normalizacja znanych struktur odpowiedzi
-    try:
-        result = data.get("result") or {}
-        subject = result.get("subject")
-        if subject is None:
-            # niektóre warianty zwracają listę subjects
-            subjects = result.get("subjects") or []
-            subject = subjects[0] if subjects else None
-        status = None
-        if subject:
-            # w API MF klucz zwykle nazywa się 'statusVat'
-            status = subject.get("statusVat") or subject.get("status")
-        return {"ok": True, "status": status, "subject": subject, "error": None}
-    except Exception as e:
-        return {"ok": False, "status": None, "subject": None, "error": f"schema: {e}"}
-
-
-def wl_check_account(nip: str, bank_account_nrb: str, date_iso: str) -> dict:
-    """
-    GET https://wl-api.mf.gov.pl/api/check/nip/{nip}/bank-account/{nrb}?date=YYYY-MM-DD
-    Zwraca: {"ok": bool, "assigned": bool|None, "error": str|None}
-    """
-    nrb = normalize_nrb(bank_account_nrb)
-    if not nrb:
-        return {"ok": False, "assigned": None, "error": "Pusty/niepoprawny NRB"}
-    url = f"https://wl-api.mf.gov.pl/api/check/nip/{nip}/bank-account/{nrb}?date={date_iso}"
-    try:
-        r = requests.get(url, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-        result = data.get("result") or {}
-        # wg specyfikacji MF bywa 'accountAssigned'
-        assigned = result.get("accountAssigned")
-        # czasem API zwraca 'message' przy błędach 200 OK
-        if assigned is None and result.get("message"):
-            return {"ok": False, "assigned": None, "error": result.get("message")}
-        return {"ok": True, "assigned": bool(assigned), "error": None}
-    except Exception as e:
-        return {"ok": False, "assigned": None, "error": f"HTTP/parse: {e}"}
-
-# Sprawdza status kontrahenta / do wyrzuciania faktur testowych z plików
 def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
     """Pobiera statusy dla wielu NIP-ów w jednym zapytaniu."""
     nip_nums = [int(nip_digits(n)) for n in nipy if nip_digits(n)]
@@ -343,10 +297,186 @@ def sanitize_nazwa_folderu(text: str) -> str:
 # ===========================================
 # Utils
 # ===========================================
+def normalize_numer_dokumentu(val):
+    """Konwertuje daty typu 1/10/2025 na tekst, resztę zostawia bez zmian"""
+    if pd.isna(val):
+        return val
+    s = str(val).strip()
+    # dopasowanie wzorca czystej daty DD/MM/YYYY lub D/M/YYYY
+    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", s):
+        try:
+            d = datetime.strptime(s, "%d/%m/%Y")
+            # zwróć jako tekst w formacie dzień/miesiąc/rok
+            return d.strftime("%#d/%#m/%Y")  # dla Windows
+        except ValueError:
+            return s
+    return s
+
+def _slugify_filename(s: str, *, max_len: int = 60) -> str:
+    """
+    Tworzy bezpieczną nazwę pliku dla Windows/macOS/Linux:
+    - podmienia niedozwolone znaki (w tym cudzysłów i apostrof) na '_',
+    - zwija wielokrotne '_' w jedno,
+    - usuwa kropki/spacje z końca,
+    - unika nazw zarezerwowanych (CON/PRN/AUX/NUL/COM1../LPT1..).
+    """
+    if not s:
+        return "plik"
+
+    # normalizacja + usunięcie diakrytyków
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.strip()
+
+    # wymiana wszystkich niedozwolonych na '_'
+    s = "".join(("_" if ch in _WINDOWS_FORBIDDEN or ch in {"'", "`"} else ch) for ch in s)
+
+    # przepuszczamy tylko [A-Za-z0-9_. -], resztę na ' '
+    s = re.sub(r"[^A-Za-z0-9_. \-]", "_", s)
+
+    # zwijanie wielokrotnych podkreślników/spacji
+    s = re.sub(r"[ _]+", " ", s)
+    s = s.replace(" ", "_")
+    s = re.sub(r"_+", "_", s)
+
+    # usunięcie kropek/spacji/podkreślników z początku/końca
+    s = s.strip(" ._")
+
+    # pusta po czyszczeniu?
+    if not s:
+        s = "plik"
+
+    base_upper = s.upper()
+    if base_upper in _WINDOWS_RESERVED:
+        s = f"_{s}"
+
+    # ograniczenie długości
+    s = s[:max_len].rstrip(" ._")
+
+    # jeszcze raz awaryjnie
+    if not s:
+        s = "plik"
+
+    return s
+
+def export_grouped_excels(df:pd.DataFrame, out_dir: str,nazwa_spolki: str) -> dict[str, str]:
+    data_folder = datetime.now().strftime("%d-%m-%Y")
+    base_path = Path(out_dir)/nazwa_spolki/data_folder
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    wanted = ["Numer dokumentu","Data wystawienia","Netto","VAT","Brutto"]
+
+    # do skonczenia, poprawić zamianę daty na nr faktury
+    # z 11-10-2025 00:00:00 na 11/10/2025
+
+    df["Data wystawienia"] = df["Data wystawienia"].dt.strftime("%d.%m.%Y")
+    df["Numer dokumentu"] = df["Numer dokumentu"].apply(normalize_numer_dokumentu)
+
+    cols = [c for c in wanted if c in df.columns]
+    if not cols:
+        raise ValueError("Brak kolumn do eksportu raportów - sprawdź nazwy w dataframe.")
+    out_map: dict[str, str] = {}
+    g = df.groupby("NIP",dropna=False,as_index=False)
+
+    for nip,sub in g:
+        nip_str = str(nip).strip()
+        kontrahent = ""
+        if "Kontrahent" in sub.columns and not sub["Kontrahent"].isna().all():
+            kontrahent = str(sub["Kontrahent"].iloc[0] or "")
+
+        fname = f"{_slugify_filename(kontrahent)}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+        fpath = base_path / fname
+
+        sub[cols].to_excel(fpath, index=False)
+        out_map[nip_str] = str(fpath.resolve())
+
+    print(f"[RAPORTY] zapisano raporty w pliku")
+    return out_map
+
+def _only_digits(s: str) -> str:
+    return re.sub(r"\D", "", str(s or "")).strip()
+
+
+def build_full_report(df: pd.DataFrame,
+                      recipients_df: pd.DataFrame,
+                      mail_results: list[dict],
+                      attachments_by_nip: dict[str, str],
+                      output_file: str):
+    """
+    Raport zbiorczy:
+    - 1 wiersz per kontrahent (NIP)
+    - dane: nazwa, nip, email, suma Netto/VAT/Brutto, ilość dokumentów, numery dokumentów, status maila
+    - dodatkowy plik z sumą globalną
+    """
+    df = df.copy()
+    df["NIP_clean"] = df["NIP"].astype(str).map(_only_digits)
+
+    recipients_df = recipients_df.copy()
+    recipients_df["nip_clean"] = recipients_df["nip"].astype(str).map(_only_digits)
+
+    # agregacja dokumentów per NIP
+    docs_grouped = (
+        df.groupby("NIP_clean")
+        .agg(
+            Netto=("Netto", "sum"),
+            VAT=("VAT", "sum"),
+            Brutto=("Brutto", "sum"),
+            ilosc_dokumentow=("Numer dokumentu", "count"),
+            dokumenty=("Numer dokumentu", lambda x: " | ".join(map(str, x)))
+        )
+        .reset_index()
+        .rename(columns={"NIP_clean": "nip_clean"})  # 🔹 DODAJ TO
+    )
+
+    # mail results -> DF
+    mail_df = pd.DataFrame(mail_results or [])
+    if not mail_df.empty:
+        mail_df.rename(columns={"email": "Email", "ok": "Wyslano_OK"}, inplace=True)
+    else:
+        mail_df = pd.DataFrame(columns=["Email", "Wyslano_OK"])
+
+    # scalanie
+    raport = (
+        recipients_df
+        .merge(docs_grouped, on="nip_clean", how="left")
+        .merge(mail_df[["Email", "Wyslano_OK"]], left_on="email", right_on="Email", how="left")
+    )
+
+    # załączniki
+    att_clean = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
+    raport["attachment_path"] = raport["nip_clean"].map(att_clean).fillna("")
+
+    # zaokrąglenia
+    for c in ["Netto", "VAT", "Brutto"]:
+        raport[c] = pd.to_numeric(raport[c], errors="coerce").fillna(0).round(2)
+    # zapis raportu szczegółowego
+    base, ext = os.path.splitext(output_file)
+    raport_path = f"{base}_full{ext or '.csv'}"
+    raport.to_csv(raport_path, index=False, encoding=OUTPUT_ENCODING, sep=";")
+    logging.info("[SAVE] Raport pełny: %s", raport_path)
+
+    # raport zbiorczy (sumy globalne)
+    summary = {
+        "suma_netto": raport["Netto"].sum(),
+        "suma_vat": raport["VAT"].sum(),
+        "suma_brutto": raport["Brutto"].sum(),
+        "suma_dokumentow": raport["ilosc_dokumentow"].sum(),
+        "ilosc_kontrahentow": raport.shape[0],
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    summary_path = f"{base}_summary{ext or '.csv'}"
+    pd.DataFrame([summary]).to_csv(summary_path, index=False, encoding=OUTPUT_ENCODING, sep=";")
+    logging.info("[SAVE] Raport zbiorczy (sumy globalne): %s", summary_path)
+
+    return raport, raport_path, summary_path
+
+
+
 def print_error_summary(error_log: list[dict], *, max_per_type: int = 10):
     """Krótkie podsumowanie + próbka błędów dla każdego typu."""
     if not error_log:
-        print("[VALID] Brak błędów ✅")
+        print("[VALID] Brak błędów ")
         return
 
     cnt = Counter(e["type"] for e in error_log)
@@ -389,8 +519,6 @@ def export_error_log(error_log: list[dict], out_csv_path: str):
         per_type_path = out_csv_path.replace(".csv", f"_{safe_t}.csv")
         sub.to_csv(per_type_path, index=False, encoding="utf-8-sig")
         print(f"[VALID] Log '{t}' zapisany: {per_type_path}")
-
-
 
 def nip_digits(nip: str) -> str:
     return re.sub(r"\D", "", str(nip or ""))
@@ -462,28 +590,6 @@ def is_blank(s: str | None) -> bool:
 # =========================
 # DB helpers
 # =========================
-
-def wl_search_bank_account(bank_account_nrb: str, date_iso: str) -> dict:
-    """
-    GET https://wl-api.mf.gov.pl/api/search/bank-account/{nrb}?date=YYYY-MM-DD
-    Zwraca:
-      {"ok": bool, "subjects": list[dict], "nips": set[str], "error": str|None}
-    """
-    nrb = normalize_nrb(bank_account_nrb)
-    if not nrb:
-        return {"ok": False, "subjects": [], "nips": set(), "error": "Pusty/niepoprawny NRB"}
-    url = f"https://wl-api.mf.gov.pl/api/search/bank-account/{nrb}?date={date_iso}"
-    try:
-        r = requests.get(url, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-        result = (data or {}).get("result") or {}
-        subjects = result.get("subjects") or []
-        nips = {clean_digits(s.get("nip", "")) for s in subjects if s.get("nip")}
-        return {"czynny podatnik": True, "subjects": subjects, "nips": nips, "error": None}
-    except Exception as e:
-        return {"nieczynny podatnik": False, "subjects": [], "nips": set(), "error": f"{e}"}
-
 
 def clean_invoice_id(s: str) -> str:
     current_year = datetime.now().year
@@ -608,6 +714,235 @@ def _latin_safe(s: str) -> str:
 def _latin_safe_join(lines: list[str]) -> str:
     return "\n".join(_latin_safe(line) for line in lines)
 
+# ===================================
+# Walidator białej listy kontrahentów
+# ===================================
+
+def clean_konto(konto: str) -> str:
+    """Zwraca nr konta jako 26 cyfr"""
+    return re.sub(r"\D", "", str(konto)).zfill(26)
+
+def clean_nip(nip: str) -> str:
+    """Zwraca NIP jako 10 cyfr"""
+    return re.sub(r"\D", "", str(nip)).zfill(10)
+
+def get_file(url: str,output_dir: str = "pliki_plaskie") -> str:
+    os.makedirs(output_dir,exist_ok=True)
+    local_filename = url.split("/")[-1]
+    local_path = os.path.join(output_dir, local_filename)
+
+    head = requests.head(url)
+    if head.status_code == 404:
+        raise FileNotFoundError(f"[E] Plik {url} nie istnieje na serwerze MF.")
+
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(local_path, "wb") as f:
+            shutil.copyfileobj(r.raw, f)
+
+    print(f"Pobrano plik płaski: {local_path}")
+    return local_path
+
+# pobiera plik płaski z użyciem get_file()
+# następnie rozpakowuje go do folderu
+def unzip():
+    output_dir = "pliki_plaskie"
+    data = datetime.today().strftime("%Y%m%d")
+    link_plik_plaski = f"https://plikplaski.mf.gov.pl/pliki/{data}.7z"
+
+    archive_path = os.path.join(output_dir, f"{data}.7z")
+    json_path = os.path.join(output_dir, f"{data}.json")
+
+    if os.path.isfile(json_path):
+        print(f"[I] Plik {json_path} już rozpakowany.")
+        return json_path
+
+    # Pobranie archiwum jeśli nie ma
+    if not os.path.isfile(archive_path):
+        archive_path = get_file(link_plik_plaski, output_dir=output_dir)
+
+    # Rozpakowanie archiwum
+    with py7zr.SevenZipFile(archive_path, mode='r') as archive:
+        archive.extractall(output_dir)
+
+    print(f"Rozpakowano plik płaski: {json_path}")
+    return json_path
+
+def Sha512Hash1(nip: str, nr_konta: str, data: str, iters: int = 5000) -> str:
+    to_hash = str(data) + nip + nr_konta
+    h = hashlib.sha512(to_hash.encode("utf-8")).hexdigest()
+    for _ in range(iters - 1):
+        h = hashlib.sha512(h.encode("utf-8")).hexdigest()
+    return h
+
+def Sha512HashNIP(nip: str, data: str, iters: int = 5000) -> str:
+    nip = clean_nip(nip)
+    to_hash = data + nip
+    h = hashlib.sha512(to_hash.encode("utf-8")).hexdigest()
+    for _ in range(iters - 1):
+        h = hashlib.sha512(h.encode("utf-8")).hexdigest()
+    return h
+
+def data_from_db() -> Dict[str, str]:
+    query = """
+    SELECT nip::text AS nip, nr_konta
+    FROM merchanci
+    WHERE nip IS NOT NULL AND nr_konta IS NOT NULL;
+    """
+    result = {}
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            for row in cur.fetchall():
+                nip_raw = str(row["nip"]).strip()
+                # usuń ".0" z końca, jeśli jest
+                if nip_raw.endswith(".0"):
+                    nip_raw = nip_raw[:-2]
+                nip_clean = clean_nip(nip_raw)
+                konto_clean = clean_konto(row["nr_konta"])
+                result[nip_clean] = konto_clean
+
+    print(f"[DB] Pobranie {len(result)} rekordów z merchanci.")
+    return result
+
+def group_maski_by_bank(maski: List[str]) -> Dict[str, List[str]]:
+    grouped = {}
+    for m in maski:
+        bank_code = m[2:10]
+        grouped.setdefault(bank_code, []).append(m)
+    return grouped
+
+def load_nipy_z_excela(file_path: str) -> set[str]:
+    """Wczytuje kolumnę 'NIP' z pliku Excel i zwraca zestaw NIP-ów (10 cyfr)."""
+    df = pd.read_excel(file_path)
+
+    if "NIP" not in df.columns:
+        raise ValueError("[WL] W pliku Excel nie znaleziono kolumny 'NIP'.")
+
+    nipy = (
+        df["NIP"]
+        .dropna()
+        .astype(str)
+        .map(clean_nip)
+        .unique()
+    )
+
+    print(f"[WL] Wczytano {len(nipy)} unikalnych NIP-ów z Excela.")
+    #
+    return set(nipy)
+
+def load_flatfile(json_file: str):
+    """Wczytuje plik płaski do pamięci"""
+    with open(json_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    naglowek = data.get("naglowek", {})
+    gen_date = (
+        naglowek.get("dataGenerowaniaPliku")
+        or naglowek.get("dataGenerowaniaDanych")
+        or naglowek.get("data")
+        or datetime.today().strftime("%Y%m%d")
+    ).replace("-", "")
+
+    iters = int(naglowek.get("liczbaTransformacji", 5000))
+    czynni = set(data.get("skrotyPodatnikowCzynnych", []))
+    zwolnieni = set(data.get("skrotyPodatnikowZwolnionych", []))
+    maski_map = group_maski_by_bank(data.get("maski", []))
+
+    return gen_date, iters, czynni, zwolnieni, maski_map
+
+
+def apply_mask(nr_konta: str, maska: str) -> str:
+    result = []
+    for i, m in enumerate(maska):
+        if m == 'X':
+            result.append('X')
+        elif m == 'Y' and i < len(nr_konta):
+            result.append(nr_konta[i])
+        else:
+            result.append(m)
+    return "".join(result)
+
+
+def porownaj_nipy(file_path: str):
+    nipy_excel = load_nipy_z_excela(file_path)
+    nipy_db = set(data_from_db().keys())
+
+    wspolne = nipy_excel & nipy_db
+    tylko_w_excelu = nipy_excel - nipy_db
+    tylko_w_bazie = nipy_db - nipy_excel
+
+    if tylko_w_excelu:
+        print("\nNIP-y z Excela, których brak w bazie:")
+        for nip in sorted(tylko_w_excelu):
+            print("  -", nip)
+
+    if tylko_w_bazie:
+        print("\nNIP-y z bazy, których brak w Excelu:")
+        for nip in sorted(tylko_w_bazie):
+            print("  -", nip)
+
+    return {
+        "wspolne": wspolne,
+        "tylko_w_excelu": tylko_w_excelu,
+        "tylko_w_bazie": tylko_w_bazie,
+    }
+
+def sprawdz_excelowe_kontrahenty(json_file: str, excel_file: str):
+    """Sprawdza NIP-y z Excela i bazy w pliku płaskim MF"""
+    baza_danych = data_from_db()
+    nipy_excel = load_nipy_z_excela(excel_file)
+
+    # For DEBUG purposes only
+    #print("[WL] Debug – 10 pierwszych z Excela:", list(nipy_excel)[:10])
+    #print("[WL] Debug – 10 pierwszych z bazy:", list(baza_danych.keys())[:10])
+    #print("[WL] Typ pierwszego z bazy:", type(next(iter(baza_danych.keys()))))
+
+    nipy_wspolne = nipy_excel & set(baza_danych.keys())
+    if not nipy_wspolne:
+        print("[E] Brak wspólnych NIP-ów między Excelem a bazą.")
+        return []
+
+    gen_date, iters, czynni, zwolnieni, maski_map = load_flatfile(json_file)
+    brakujace = []
+
+    for nip in sorted(nipy_wspolne):
+        konto = baza_danych.get(nip)
+        nip_clean = clean_nip(nip)
+        konto_clean = clean_konto(konto)
+        znaleziony = False
+
+        # pełny NRB
+        hash_value = Sha512Hash1(nip_clean, konto_clean, data=gen_date, iters=iters)
+        if hash_value in czynni or hash_value in zwolnieni:
+            znaleziony = True
+        else:
+            # maski wg banku
+            bank_code = konto_clean[2:10]
+            for maska in maski_map.get(bank_code, []):
+                masked_account = apply_mask(konto_clean, maska)
+                hash_value = Sha512Hash1(nip_clean, masked_account, data=gen_date, iters=iters)
+                if hash_value in czynni or hash_value in zwolnieni:
+                    znaleziony = True
+                    break
+            # fallback po samym NIP
+            if not znaleziony:
+                hash_value = Sha512HashNIP(nip_clean, data=gen_date, iters=iters)
+                if hash_value in czynni or hash_value in zwolnieni:
+                    znaleziony = True
+
+        if not znaleziony:
+            brakujace.append((nip_clean, konto_clean))
+            print(f"[WL] Brak w pliku płaskim: NIP={nip_clean}, Konto={konto_clean}")
+
+    # raport CSV
+    # if brakujace:
+    #     df_b = pd.DataFrame(brakujace, columns=["NIP", "Konto"])
+    #     df_b.to_csv("brak_na_bialej_liscie.csv", index=False, encoding="utf-8-sig")
+    #     print(f"[WL] 📄 Zapisano raport: brak_na_bialej_liscie.csv")
+
+    print(f"[WL] Sprawdzono kontrahentów: brak wpisu w pliku MF dla {len(brakujace)} pozycji.")
+    return brakujace
 
 # =========================
 # Scraper REGON (Selenium)
@@ -627,7 +962,11 @@ class RegonScraper:
             options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920x1080")
-        service = Service(self.chromedriver_path)
+        options.add_argument("--log-level=3")
+        options.add_argument("--disable-logging")
+        options.add_argument("--silent")
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        service = Service(self.chromedriver_path,log_path=os.devnull)
         self.driver = webdriver.Chrome(service=service, options=options)
         return self
 
@@ -737,7 +1076,7 @@ def build_payment_record(
     # klasyfikacja: str,
     # informacja_klient_bank: str,
 ) -> str:
-    # Uwaga: BEZ cudzysłowów – czyste wartości rozdzielone przecinkami.
+
     fields = [
         "110",
         data_platnosci,
@@ -787,6 +1126,8 @@ def find_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     full_dup_groups = d.loc[d["__is_dup_group"]].copy()
 
     return d, full_dup_groups.sort_values(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])
+
+
 
 def handle_duplicates(df: pd.DataFrame, action: str = "error") -> pd.DataFrame:
     d, full_dups = find_duplicates(df)
@@ -897,12 +1238,19 @@ def przetworz_plik_xlsx(
     headless: bool = True,
     merged_csv: Optional[str] = None,
     per_group_dir: Optional[str] = None,
-    wl_check: bool = True
 ):
     # --- walidacja spółki / nadawcy ---
     key = company.strip().lower()
     if key not in COMPANIES:
         raise ValueError(f"Nieznana firma: {company}. Dozwolone: {', '.join(sorted(COMPANIES))}")
+
+    # --- Integracja z Białą Listą MF ---
+    try:
+        print("[WL] Pobieram i sprawdzam plik płaski MF...")
+        json_path = unzip()
+        sprawdz_excelowe_kontrahenty(json_path, input_file)
+    except Exception as e:
+        print(f"[WL] ⚠️ Błąd podczas sprawdzania kontrahentów: {e}")
 
     conf = COMPANIES[key]
     nazwa_i_adres_zleceniodawcy = conf["name_addr"]
@@ -958,23 +1306,9 @@ def przetworz_plik_xlsx(
         print("[INFO] Po filtracji brak poprawnych wierszy.")
         return
 
-    # # --- odfiltrowanie PREMERCHANT z DB ---
-    # status_map = fetch_statusy_kontrahentow(df["NIP"].unique())
-    # mask_prem = df["NIP"].astype(str).apply(
-    #     lambda nip: (status_map.get(re.sub(r"\D", "", str(nip)), "") or "").lower() == "premerchant"
-    # )
-    # if mask_prem.any():
-    #     print(f"[WARN] Pomijam {int(mask_prem.sum())} wierszy od kontrahentów PREMERCHANT (zapisano raport).")
-    #     df.loc[mask_prem].to_csv(os.path.join(OUTPUT_DIR, f"premerchant_{ts}.csv"), index=False, encoding="utf-8-sig")
-    # df = df.loc[~mask_prem].copy()
-    # if df.empty:
-    #     with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
-    #         f.write("")
-    #     print("[INFO] Po filtracji brak poprawnych wierszy (po PREMERCHANT).")
-    #     return
-
-    # --- kolumny pomocnicze ---
-
+    raport_excell_dir = "raporty_faktur_xlsx"
+    xlsx_map = export_grouped_excels(df,out_dir=raport_excell_dir,nazwa_spolki=key)
+    logging.info(f"[EXPORT] Zapisano raport z fakturami kontrahentów do folderu %s",raport_excell_dir)
 
     df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
     df["__vat_gr"]    = df["VAT"].apply(money_to_grosze)
@@ -1076,32 +1410,6 @@ def przetworz_plik_xlsx(
         nrb = normalize_nrb(raw)
         nip_to_nrb[nip] = nrb if nrb else "0" * 26
 
-    # budujemy jednorazowe zapytania WL per (NRB, data)
-    accounts_to_query: set[tuple[str, str]] = set()
-    unique_nrbs: set[str] = set()
-
-    for _, r in agg.iterrows():
-        nip = str(r["nip_clean"] or "")
-        if nip.isdigit() and len(nip) == 10:
-            nrb = nip_to_nrb.get(nip, "0" * 26)
-            if nrb and nrb != "0" * 26:
-                unique_nrbs.add(nrb)
-
-    wl_acc_map: dict[tuple[str, str], set[str]] = {}   # (nrb, date_iso) set(NIP)
-    #date_iso = datetime.today().isoformat("%Y-%m-%d")
-    # ewentualne błędy : to format daty
-    if wl_check:
-        for (nrb, date_iso) in sorted(accounts_to_query):
-            res = wl_search_bank_account(nrb, date_iso)
-            if not res["ok"]:
-                print(f"[WL][ACC][ERR] NRB={nrb} date={date_iso}: {res['error']}")
-                wl_acc_map[(nrb, date_iso)] = set()
-            else:
-                wl_acc_map[(nrb, date_iso)] = res["nips"]
-                print(f"[WL][ACC] NRB={nrb} date={date_iso} -> NIPy={len(res['nips'])}")
-
-    # licznik/log WL
-    wl_cnt_assigned = wl_cnt_unassigned = wl_cnt_skipped = 0
 
     # --- generowanie rekordów i buforowanie per-dzień ---
     lines_by_day: dict[str, list[str]] = defaultdict(list)
@@ -1131,18 +1439,6 @@ def przetworz_plik_xlsx(
                 adres_kontr = clean_address(adres_kontr)
                 nr_rozliczeniowy_banku_kontrahenta = bank_code_from_nrb(rachunek_kontrahenta)
 
-                # WL: przypisanie konta do NIP (tylko gdy realny NRB)
-                if wl_check and valid_nip and rachunek_kontrahenta != "0"*26:
-                    date_iso = wl_api_iso_date_from_yyyymmdd(row["__data_str"])
-                    assigned_set = wl_acc_map.get((rachunek_kontrahenta, date_iso), set())
-                    assigned = nip_clean in assigned_set
-                    if assigned:
-                        wl_cnt_assigned += 1
-                    else:
-                        wl_cnt_unassigned += 1
-                    print(f"[WL][ACC] NIP={nip_clean} NRB={rachunek_kontrahenta} date={date_iso} assigned={assigned}")
-                else:
-                    wl_cnt_skipped += 1  # brak WL (np. 26x'0' albo niepoprawny NIP)
 
                 # pole 16 (max 19) – NIP + ddmmyy z daty wpływu
                 nip_for_ref = nip_clean if valid_nip else "NA"
@@ -1212,8 +1508,6 @@ def przetworz_plik_xlsx(
                 f"/IDP/{informacja}"
             )
 
-            # szczegoly_wrapped = wrap_szczegoly(szczegoly)
-
             line = build_payment_record(
                 data_platnosci=row["data_platnosci"],
                 kwota_brutto_gr=kw_brutto_gr,
@@ -1232,7 +1526,10 @@ def przetworz_plik_xlsx(
             lines_by_day[day_key].append(line)
 
     # --- zapis per-dzień: <firma>_przelewy_w_<ddmmyy_wplywu>_p_<ddmmyy_platnosci>.txt ---
-    base_dir = os.path.dirname(output_path) or OUTPUT_DIR
+    # zmiana miejsca zapisu plików z głównego folderu na bardziej uporządkowany sposób)
+
+    today_str = datetime.now().strftime("%Y%m%d")
+    base_dir = os.path.join("pliki_przelewow", key, f"przelewy_{key}_{today_str}")
     os.makedirs(base_dir, exist_ok=True)
 
     def _ddmmyy(s: str) -> str:
@@ -1260,9 +1557,6 @@ def przetworz_plik_xlsx(
         total_saved += len(day_lines)
 
     print(f"[ELIXIR] Łącznie zapisanych rekordów (wszystkie dni): {total_saved}")
-    if wl_check:
-        print(f"[WL][SUM] assigned={wl_cnt_assigned}  unassigned={wl_cnt_unassigned}  skipped={wl_cnt_skipped}")
-
 
 # --- CLI aplikacji ---
 if __name__ == "__main__":
@@ -1283,9 +1577,6 @@ if __name__ == "__main__":
                         help="Ścieżka zbiorczego CSV z raportem scalonych grup (domyślnie: ./raport_scalonych_<ts>.csv)")
     parser.add_argument("--per-group-dir",
                         help="Katalog na osobne CSV per kontrahent/per data; jeśli nie podasz – nie tworzy.")
-    parser.add_argument("--wl-check", action=BooleanOptionalAction, default=True,
-                        help="Sprawdzaj NIP/rachunek w białej liście MF (domyślnie: włączone)")
-
     args = parser.parse_args()
 
     przetworz_plik_xlsx(
@@ -1296,5 +1587,4 @@ if __name__ == "__main__":
         headless=args.headless,
         merged_csv=args.merged_csv,
         per_group_dir=args.per_group_dir,
-        # wl_check=args.wl_check,
     )

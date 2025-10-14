@@ -235,7 +235,7 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
         suma_prowizji = sub["Prowizja_3proc"].sum().round(2)
         sub["Suma_prowizji"] = suma_prowizji
 
-        # 🔹 Zamiana kropek na przecinki (format PL)
+        # Zamiana kropek na przecinki (format PL)
         for col in ["Netto", "VAT", "Brutto", "Prowizja_3proc", "Suma_prowizji"]:
             if col in sub.columns:
                 sub[col] = sub[col].apply(
@@ -1075,7 +1075,7 @@ def czytaj_plik(
 
         logging.info("[INVOICES-ONLY] Pobrano %d faktur PDF, zapisano w folderze 'faktury/'.", len(pdf_map))
 
-        # budowanie raportu per kontrahent
+        # budowanie rapFortu per kontrahent
         raport_dir = "raporty_xlsx"
         xlsx_map = export_grouped_excels(df, out_dir=raport_dir)
         logging.info("[EXPORT] Zapisano raporty kontrahentów do folderu: %s", raport_dir)

@@ -189,7 +189,7 @@ def sprawdz_kontrahentow(json_file: str):
     return znalezione
 
 def main():
-    # get_file(link_plik_płaski)
+    # get_file(link_plik_płaski)F
     # unzip()
     json_file = str(data) + ".json"
     sprawdz_kontrahentow(json_file)
