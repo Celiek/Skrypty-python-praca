@@ -5,7 +5,7 @@ import os
 import random
 import re
 import shutil
-import string
+
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections import Counter
@@ -75,16 +75,22 @@ COMPANIES = {
         "name_addr": os.getenv("SHUMEE_NAME_ADDR", 'Supermerchant Sp. z.o.o.| aleja 1 Maja 31/33 lok. 6| 90-739 Łódź'),
         "nrb":       os.getenv("SHUMEE_NRB",       "07114011080000314718001007"),
         "bank_code": os.getenv("SHUMEE_BANK_CODE", "11401108"),
+        "forbidden_name": ['MORELE.NET sp. z o.o','GLOBAL INCOME SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ','MORELE.NET SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ'],
+        "forbidden_nip": [9451972201,5862167315]
     },
     "greatstore": {
         "name_addr": os.getenv("GREATSTORE_NAME_ADDR", 'Greatstore Sp. z.o.o.| aleja 1 Maja 31/33 lok. 6| 90-739 Łódź'),
         "nrb":       os.getenv("GREATSTORE_NRB",       "35114011080000363961001006"),
         "bank_code": os.getenv("GREATSTORE_BANK_CODE", "11401108"),
+        "forbidden_name": ['MORELE.NET SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ','MORELE.NET sp. z o.o'],
+        "forbidden_nip": [9451972201,5862167315]
     },
     "extrastore": {
         "name_addr": os.getenv("EXTRASTORE_NAME_ADDR", 'Extrastore Sp. z.o.o.| aleja 1 Maja 31/33 lok. 6| 90-739 Łódź'),
         "nrb":       os.getenv("EXTRASTORE_NRB",       "05114020040000330280429939"),
         "bank_code": os.getenv("EXTRASTORE_BANK_CODE", "11402004"),  # 8 cyfr
+        "forbidden_name": ['MORELE.NET SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ','MORELE.NET sp. z o.o'],
+        "forbidden_nip": [9451972201,5862167315]
     },
 }
 
@@ -99,6 +105,11 @@ _WINDOWS_RESERVED  = {
     *(f"COM{i}" for i in range(1,10)),
     *(f"LPT{i}" for i in range(1,10)),
 }
+
+
+forbidden_kontrahenci = pd.DataFrame({
+    'MORELE.NET sp. z o.o','Global Income sp. z o.o.'
+})
 
 # Domyślnie ISO-8859-2 (lub nadpisz w .env)
 OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
@@ -297,21 +308,19 @@ def sanitize_nazwa_folderu(text: str) -> str:
 # ===========================================
 # Utils
 # ===========================================
-def normalize_numer_dokumentu(val):
-    """Konwertuje daty typu 1/10/2025 na tekst, resztę zostawia bez zmian"""
-    if pd.isna(val):
-        return val
-    s = str(val).strip()
-    # dopasowanie wzorca czystej daty DD/MM/YYYY lub D/M/YYYY
-    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", s):
-        try:
-            d = datetime.strptime(s, "%d/%m/%Y")
-            # zwróć jako tekst w formacie dzień/miesiąc/rok
-            return d.strftime("%#d/%#m/%Y")  # dla Windows
-        except ValueError:
-            return s
-    return s
+def convert_dates_to_strings(df, column_name):
+    """Zamienia tylko wartości typu datetime na stringi w formacie DD/MM/YYYY"""
+    if column_name not in df.columns:
+        raise ValueError(f"Brak kolumny '{column_name}' w DataFrame.")
 
+    def _convert(val):
+        # jeśli to obiekt datetime lub Timestamp — konwertuj
+        if isinstance(val, (pd.Timestamp, datetime)):
+            return val.strftime("%d/%m/%Y")
+        return val  # resztę zostaw bez zmian
+
+    df[column_name] = df[column_name].apply(_convert)
+    return df
 def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     """
     Tworzy bezpieczną nazwę pliku dla Windows/macOS/Linux:
@@ -371,7 +380,8 @@ def export_grouped_excels(df:pd.DataFrame, out_dir: str,nazwa_spolki: str) -> di
     # z 11-10-2025 00:00:00 na 11/10/2025
 
     df["Data wystawienia"] = df["Data wystawienia"].dt.strftime("%d.%m.%Y")
-    df["Numer dokumentu"] = df["Numer dokumentu"].apply(normalize_numer_dokumentu)
+    df = convert_dates_to_strings(df, "Numer dokumentu")
+    #df["Numer dokumentu"] = df["Numer dokumentu"].apply(convert_dates_to_strings)
 
     cols = [c for c in wanted if c in df.columns]
     if not cols:
@@ -1281,6 +1291,19 @@ def przetworz_plik_xlsx(
     brak = wymagane - set(df.columns)
     if brak:
         raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
+
+    # --- wyszukiwanie zakazanych kontrahentów ---
+    forbidden_name_list = COMPANIES[key]["forbidden_name"]
+    forbidden_nip_list = COMPANIES[key]["forbidden_nip"]
+
+    mask = df["Kontrahent"].isin(forbidden_name_list)
+    maska_nip = df["NIP"].isin(forbidden_nip_list)
+    if mask.any():
+        print("[WARN] PLIK ZAWIERA ZAKAZANYCH KONTRAHENTÓW:")
+        print(df.loc[mask,["Kontrahent"]])
+    if maska_nip.any():
+        print("[WARN] PLIK ZAWIERA NIPY ZAKAZANYCH KONTRAHENTÓW:")
+        print(df.loc[maska_nip, ["NIP"]])
 
     # --- walidacja (loguj, nie wycinaj) ---
     df, error_log = validate_df(

@@ -40,6 +40,9 @@ import csv
 # usunąć logo DONE
 # dodac tryb tylko wystaw faktury DONE
 
+# TODO 2:
+# zmienić stawkę z 3 na 2 % dla leobert DONE
+# dodać wstawianie adresu kontrahenta na fakturę DONE
 
 # =========================
 # Konfiguracja / stałe
@@ -96,6 +99,8 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
 }
+# lista kontrahentów którzy są fakturowani na kwotę 2 procent
+SPECIAL_2PROC_NIPS = {"6020134043"}
 
 COMPANIES = {
     "shumee": {
@@ -107,6 +112,7 @@ COMPANIES = {
         "server_host":os.getenv("SHUMEE_SERVER_HOST", "smtp.gmail.com"),
         "kontakt":os.getenv("SHUMEE_KONTAKT", "kontakt@shumee.pl"),
         "password":os.getenv("SHUMEE_PASS"),
+        #"forbidden_names": ['MORELE.NET sp. z o.o','GLOBAL INCOME SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ','MORELE.NET SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ','LEOBERT SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ SPÓŁKA KOMANDYTOWA']
     },
     "greatstore": {
         "name_addr": os.getenv("GREATSTORE_NAME_ADDR", "Greatstore Sp. z.o.o."),
@@ -195,7 +201,6 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     # pusta po czyszczeniu?
     if not s:
         s = "plik"
-
 
     base_upper = s.upper()
     if base_upper in _WINDOWS_RESERVED:
@@ -335,20 +340,28 @@ def handle_duplicates(df: pd.DataFrame, action="drop_keep_first", report_path: O
 
     return df
 
-# def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
-#     """SELECT nip, status FROM merchanci WHERE nip IN (...)"""
-#     nums = [re.sub(r"\D", "", str(n)) for n in nipy if n]
-#     nums = [n for n in nums if n]
-#     if not nums:
-#         return {}
-#     placeholders = ",".join(["%s"] * len(nums))
-#     query = f"SELECT nip, status FROM merchanci WHERE nip IN ({placeholders})"
-#     result = {}
-#     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-#         cur.execute(query, tuple(nums))
-#         for row in cur.fetchall():
-#             result[str(row["nip"])] = row["status"]
-#     return result
+def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
+    """SELECT nip, status FROM merchanci WHERE nip IN (...)"""
+    nums = [re.sub(r"\D", "", str(n)) for n in nipy if n]
+    nums = [n for n in nums if n]
+    if not nums:
+        return {}
+    placeholders = ",".join(["%s"] * len(nums))
+
+    query = f"""
+           SELECT nip, status
+           FROM merchanci
+           WHERE nip IN ({placeholders})
+             AND (status = 'merchant' OR status = 'to-skomplikowane')
+       """
+
+    result = {}
+
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query, tuple(nums))
+        for row in cur.fetchall():
+            result[str(row["nip"])] = row["status"]
+    return result
 
 # def fetch_emails(nipy) -> pd.DataFrame:
 #     """Zwraca DF kolumny: nip, email (dla listy NIP-ów)."""
@@ -384,6 +397,7 @@ def build_full_report(df: pd.DataFrame,
     - dane: nazwa, nip, email, suma Netto/VAT/Brutto, ilość dokumentów, numery dokumentów, status maila
     - dodatkowy plik z sumą globalną
     """
+
     df = df.copy()
     df["NIP_clean"] = df["NIP"].astype(str).map(_only_digits)
 
@@ -445,7 +459,6 @@ def build_full_report(df: pd.DataFrame,
     logging.info("[SAVE] Raport zbiorczy (sumy globalne): %s", summary_path)
 
     return raport, raport_path, summary_path
-
 
 def build_recipients_report_only(df, recipients_df, mail_results, attachments_by_nip, output_file):
     # oczyszczanie nipu
@@ -573,14 +586,19 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
 
     grouped = grouped[grouped["Netto"] > 0]
 
-    # obliczenia sumy zaokrąglone do 4 miejsc po przecinku
-    grouped["stawka_netto_3p"] = grouped["Netto"].apply(
-        lambda x: (x * Decimal("0.03")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    # obliczanie wartości netto i brutto na fakturze
+    grouped["stawka_proc"] = grouped["NIP"].astype(str).apply(
+        lambda nip: Decimal("0.02") if nip in SPECIAL_2PROC_NIPS else Decimal("0.03")
     )
+    grouped["stawka_netto"] = grouped["Netto"].apply(
+        lambda x: Decimal(x).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    ) * grouped["stawka_proc"]
 
-    grouped["stawka_brutto_3p"] = grouped["stawka_netto_3p"].apply(
-        lambda x: (x * Decimal("1.23")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-    )
+    grouped["stawka_brutto_3p"] = [
+        (n * Decimal("1.22") if p == Decimal("0.02") else n * Decimal("1.23")).quantize(Decimal("0.0001"),
+                                                                                        rounding=ROUND_HALF_UP)
+        for n, p in zip(grouped["stawka_netto"], grouped["stawka_proc"])
+    ]
 
     # 4) Przygotowanie wyników
     rows = []
@@ -1075,7 +1093,7 @@ def czytaj_plik(
 
         logging.info("[INVOICES-ONLY] Pobrano %d faktur PDF, zapisano w folderze 'faktury/'.", len(pdf_map))
 
-        # budowanie rapFortu per kontrahent
+        # budowanie raportu per kontrahent
         raport_dir = "raporty_xlsx"
         xlsx_map = export_grouped_excels(df, out_dir=raport_dir)
         logging.info("[EXPORT] Zapisano raporty kontrahentów do folderu: %s", raport_dir)
