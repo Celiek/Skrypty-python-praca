@@ -3,26 +3,22 @@ import os
 import re
 import smtplib
 import ssl
-from email.mime.application import MIMEApplication
-from pathlib import Path
-
-import unicodedata
 from argparse import ArgumentParser
 from datetime import datetime, timedelta, date
+from decimal import Decimal, ROUND_HALF_UP
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Dict, Tuple, Optional
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from pathlib import Path
+from typing import List, Dict, Optional
 
 import pandas as pd
 import psycopg2
 import requests
+import unicodedata
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
-import csv
 
 # TODO
 # Dodać wykorzystanie bazy danych do wyszukiwania fakturowania kontrahentów
@@ -43,6 +39,9 @@ import csv
 # TODO 2:
 # zmienić stawkę z 3 na 2 % dla leobert DONE
 # dodać wstawianie adresu kontrahenta na fakturę DONE
+# dodać sprawdzania czy kontrahent jest rzeczywiście merchantem czy premerchantem
+# zaktualizować bazę danych o adresy email
+# wpaść na pomysł sensownego filtorwania faktur przy wystawianiu
 
 # =========================
 # Konfiguracja / stałe
@@ -543,9 +542,14 @@ def build_recipients_report_only(df, recipients_df, mail_results, attachments_by
 # =========================
 # Fakturownia helpers
 # =========================
+
 def lista_faktur_sm3() -> List[dict]:
     """Zwraca faktury z bieżącego miesiąca, których number kończy się na '/sm3'."""
-    url = "https://shumee.fakturownia.pl/invoices.json"
+
+    # odkomentować po fazie testów:
+    #url = "https://shumee.fakturownia.pl/invoices.json"
+
+    url = "http://127.0.0.1:5000/api/invoices.json"
     params = {
         "period": "this_month",
         "api_token": API_KEY,
@@ -590,14 +594,14 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
     grouped["stawka_proc"] = grouped["NIP"].astype(str).apply(
         lambda nip: Decimal("0.02") if nip in SPECIAL_2PROC_NIPS else Decimal("0.03")
     )
-    grouped["stawka_netto"] = grouped["Netto"].apply(
+    grouped["stawka_netto_3procent"] = grouped["Netto"].apply(
         lambda x: Decimal(x).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
     ) * grouped["stawka_proc"]
 
-    grouped["stawka_brutto_3p"] = [
+    grouped["stawka_brutto_3procent"] = [
         (n * Decimal("1.22") if p == Decimal("0.02") else n * Decimal("1.23")).quantize(Decimal("0.0001"),
                                                                                         rounding=ROUND_HALF_UP)
-        for n, p in zip(grouped["stawka_netto"], grouped["stawka_proc"])
+        for n, p in zip(grouped["stawka_netto_3procent"], grouped["stawka_proc"])
     ]
 
     # 4) Przygotowanie wyników
@@ -613,8 +617,8 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
             "buyer_name": str(r["Kontrahent"]).strip(),
             "buyer_tax_no": str(r["NIP"]).strip(),
             "buyer_email": email,
-            "amount_net": str(r["stawka_netto_3p"]),  # typ decimal ( dokłądność do 4 miejsc po przecinku)
-            "amount_gross": str(r["stawka_brutto_3p"]),
+            "amount_net": str(r["stawka_netto_3procent"]),  # typ decimal ( dokłądność do 4 miejsc po przecinku)
+            "amount_gross": str(r["stawka_brutto_3procent"]),
         })
 
     # DEBUG
@@ -622,8 +626,8 @@ def build_invoice_rows(df: pd.DataFrame, recipients_df: Optional[pd.DataFrame] =
     for _, r in grouped.iterrows():
         print(
             f"NIP={r['NIP']} | Netto SUM={r['Netto']} | "
-            f"stawka 3% netto={r['stawka_netto_3p']} | "
-            f"stawka 3% brutto={r['stawka_brutto_3p']}"
+            f"stawka 3% netto={r['stawka_netto_3procent']} | "
+            f"stawka 3% brutto={r['stawka_brutto_3procent']}"
         )
     print("================================")
 
@@ -633,7 +637,10 @@ def get_invoice_public_url(invoice_id: int, api_key: str) -> Optional[str]:
     """
     Zwraca publiczny link (np. 'view_url' lub 'public_url') do faktury w Fakturowni.
     """
-    url = f"https://shumee.fakturownia.pl/invoices/{invoice_id}.json"
+
+    # po testowaniu odkomentować
+    #url = f"https://shumee.fakturownia.pl/invoices/{invoice_id}.json"
+    url = f"http://127.0.0.1:5000/api/api/invoices/link"
     try:
         r = requests.get(url, params={"api_token": api_key}, timeout=30)
         r.raise_for_status()
@@ -806,7 +813,6 @@ def build_recipients_send_only(df: pd.DataFrame,
     return out
 
 
-
 def dodaj_faktury(spolka: str, items: List[Dict], sell_date: Optional[str] = None) -> List[Dict]:
 
     if spolka not in DEPARTMENT_ID:
@@ -819,7 +825,9 @@ def dodaj_faktury(spolka: str, items: List[Dict], sell_date: Optional[str] = Non
                 7:"lipiec",8:"sierpień",9:"wrzesień",10:"październik",11:"listopad",12:"grudzień"}
     poprzedni = today - relativedelta(months=1)
 
-    url = "https://shumee.fakturownia.pl/invoices.json"
+    #url = "https://shumee.fakturownia.pl/invoices.json"
+    url = "http://127.0.0.1:5000/api/addinvoice"
+
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
     results = []
@@ -912,8 +920,13 @@ def _safe_name(name: str) -> str:
 # kod do pobierania faktur w formie pdf z fakturowni
 # do wysyłania jako załącznik w emailach
 def get_faktur():
-    url = "https://shumee.fakturownia.pl/invoices.json"
-    link_pdf = "https://shumee.fakturownia.pl/invoices/{invoice_id}.pdf"
+
+    # odkomnetować po testach
+    # url = "https://shumee.fakturownia.pl/invoices.json"
+    # link_pdf = "https://shumee.fakturownia.pl/invoices/{invoice_id}.pdf"
+
+    url = "http://127.0.0.1:5000/api/invoices.json"
+    link_pdf = "http://127.0.0.1:5000/api/invoices/{invoice_id}.pdf"
 
     all_invoices = []
     page = 1
