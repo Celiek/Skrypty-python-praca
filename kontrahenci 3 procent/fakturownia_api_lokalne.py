@@ -44,21 +44,21 @@ def add_invoice_fakturownia_mock():
 
     base_url = f"http://127.0.0.1:5000/public/invoices/{invoice_id}"
 
-    response = {
-        "id": invoice_id,
-        "number": invoice_number,
-        "buyer_name": invoice.get("buyer_name"),
-        "buyer_tax_no": invoice.get("buyer_tax_no"),
-        "issue_date": invoice.get("issue_date"),
-        "sell_date": invoice.get("sell_date"),
-        "amount_gross": invoice.get("amount_gross") or invoice["positions"][0]["total_price_gross"],
-        "view_url": f"{base_url}/view",
-        "public_url": base_url,
-        "print_url": f"{base_url}/print",
-        "download_url": f"{base_url}.pdf"
-    }
+    # response = {
+    #     "id": invoice_id,
+    #     "number": invoice_number,
+    #     "buyer_name": invoice.get("buyer_name"),
+    #     "buyer_tax_no": invoice.get("buyer_tax_no"),
+    #     "issue_date": invoice.get("issue_date"),
+    #     "sell_date": invoice.get("sell_date"),
+    #     "amount_gross": invoice.get("amount_gross") or invoice["positions"][0]["total_price_gross"],
+    #     "view_url": f"{base_url}/view",
+    #     "public_url": base_url,
+    #     "print_url": f"{base_url}/print",
+    #     "download_url": f"{base_url}.pdf"
+    # }
 
-    return jsonify(response), 200
+    return 200
 
 @app.route("/api/invoices", methods=["GET"])
 def list_invoices():
