@@ -247,6 +247,21 @@ def kopiuj_poprawne_pliki():
             print(f"[BŁĄD] Nie skopiowano: {plik}\nPowód: {e}")
             bledy += 1
 
+        for root, dirnames, filenames in os.walk(root_folder, topdown=False):
+            # Sprawdź, czy to ostatni podfolder (brak dalszych podkatalogów)
+            if not dirnames:
+                liczba_plikow = len(filenames)
+                folder_path = root
+                folder_name = os.path.basename(folder_path)
+                parent_path = os.path.dirname(folder_path)
+
+                if not folder_name.startswith(f"{liczba_plikow}"):
+                    nowa_nazwa = f"{liczba_plikow}_{folder_name}"
+                    nowa_sciezka = os.path.join(parent_path, nowa_nazwa)
+
+                    os.rename(folder_path, nowa_sciezka)
+                    # print(f'📁 {folder_name} → {nowa_nazwa}')
+
     messagebox.showinfo(
         "Podsumowanie kopiowania",
         f"✅ Skopiowano: {kopiowane_razem}\n❌ Błędy kopiowania: {bledy}\n📂 Folder docelowy: {folder_docelowy}"
@@ -318,5 +333,6 @@ output_text.tag_config("duplikat", foreground="orange")
 output_text.tag_config("info", foreground="blue", font=("Arial", 10, "bold"))
 output_text.tag_config("inne_wzorce", foreground="purple")
 duplikat_output_text.tag_config("duplikat", foreground="orange")
+
 
 root.mainloop()
