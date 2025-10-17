@@ -211,13 +211,22 @@ def kopiuj_poprawne_pliki():
     kopiowane_razem = 0
     bledy = 0
 
+    def bezpieczny_tekst(plik):
+        """Zwraca tekst PDF lub pusty string jeśli wystąpił błąd."""
+        try:
+            tekst, _ = fast_extract_text(plik)
+            return tekst or ""
+        except Exception as e:
+            print(f"[BŁĄD OCR] {plik}: {e}")
+            return ""
+
     # KOPIOWANIE: poprawne
     for plik in poprawne_bez_duplikatow:
         try:
             rel_path = os.path.relpath(plik, root_folder)
             folder_nadrzedny = os.path.dirname(rel_path)
 
-            tekst, _ = fast_extract_text(plik)
+            tekst = bezpieczny_tekst(plik)
             wzorzec_znaleziony = next((wz for wz in wzorce if wz.lower() in tekst.lower()), "NIEZNANY")
             folder_z_wzorcem = wzorzec_znaleziony.upper()
 
@@ -235,7 +244,7 @@ def kopiuj_poprawne_pliki():
             rel_path = os.path.relpath(plik, root_folder)
             folder_nadrzedny = os.path.dirname(rel_path)
 
-            tekst, _ = fast_extract_text(plik)
+            tekst = bezpieczny_tekst(plik)
             wzorzec_dopasowany = next((wz for wz in wzorce if wz.lower() in tekst.lower()), "NIEZNANY")
             folder_z_wzorcem = wzorzec_dopasowany.upper()
 
@@ -247,25 +256,27 @@ def kopiuj_poprawne_pliki():
             print(f"[BŁĄD] Nie skopiowano: {plik}\nPowód: {e}")
             bledy += 1
 
-        for root, dirnames, filenames in os.walk(root_folder, topdown=False):
-            # Sprawdź, czy to ostatni podfolder (brak dalszych podkatalogów)
-            if not dirnames:
-                liczba_plikow = len(filenames)
-                folder_path = root
-                folder_name = os.path.basename(folder_path)
-                parent_path = os.path.dirname(folder_path)
+    # DODATKOWO: zmiana nazw folderów na "liczba_plików_nazwa"
+    for root, dirnames, filenames in os.walk(root_folder, topdown=False):
+        if not dirnames:
+            liczba_plikow = len(filenames)
+            folder_path = root
+            folder_name = os.path.basename(folder_path)
+            parent_path = os.path.dirname(folder_path)
 
-                if not folder_name.startswith(f"{liczba_plikow}"):
-                    nowa_nazwa = f"{liczba_plikow}_{folder_name}"
-                    nowa_sciezka = os.path.join(parent_path, nowa_nazwa)
-
+            if not folder_name.startswith(f"{liczba_plikow}_"):
+                nowa_nazwa = f"{liczba_plikow}_{folder_name}"
+                nowa_sciezka = os.path.join(parent_path, nowa_nazwa)
+                try:
                     os.rename(folder_path, nowa_sciezka)
-                    # print(f'📁 {folder_name} → {nowa_nazwa}')
+                except Exception as e:
+                    print(f"[BŁĄD ZMIANY NAZWY] {folder_path}: {e}")
 
     messagebox.showinfo(
         "Podsumowanie kopiowania",
         f"✅ Skopiowano: {kopiowane_razem}\n❌ Błędy kopiowania: {bledy}\n📂 Folder docelowy: {folder_docelowy}"
     )
+
 
 
 
