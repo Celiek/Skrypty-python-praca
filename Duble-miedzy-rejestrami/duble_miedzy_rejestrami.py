@@ -1,9 +1,9 @@
 import pandas as pd
 
 # === KONFIGURACJA ===
-plik1 = "4i3.xlsx"
-plik2 = "4i3_2.xlsx"
-plik_wynikowy = "duplikaty.xlsx"
+plik2 = "Shumee zrzut z optimy od sierpnia do pazdziernika.xlsx"
+plik1 = "Shumee przelewy 14.10.2025.xlsx"
+plik_wynikowy = "duplikaty shumee 14.10.25.xlsx"
 
 # Kolumny po których porównujemy
 kolumny_kluczowe = ['Netto', 'Brutto', 'Vat', 'Nip', 'Numer dokumentu']

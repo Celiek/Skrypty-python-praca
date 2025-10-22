@@ -84,7 +84,7 @@ def db_conn():
 def data_from_db() -> Dict[str, str]:
     """Pobranie NIP + NRB z bazy (od razu wyczyszczone)"""
     query = """
-    SELECT nip, nr_konta FROM merchanci WHERE nip IS NOT NULL AND nr_konta IS NOT NULL;
+    SELECT nip, nr_konta_sm FROM merchanci WHERE nip IS NOT NULL AND nr_konta_sm IS NOT NULL;
     """
     result = {}
     with db_conn() as conn:
@@ -92,7 +92,7 @@ def data_from_db() -> Dict[str, str]:
             cur.execute(query)
             for row in cur.fetchall():
                 nip_str = clean_nip(row["nip"])
-                konto_str = clean_konto(row["nr_konta"])
+                konto_str = clean_konto(row["nr_konta_sm"])
                 result[nip_str] = konto_str
     return result
 
@@ -189,8 +189,8 @@ def sprawdz_kontrahentow(json_file: str):
     return znalezione
 
 def main():
-    # get_file(link_plik_płaski)F
-    # unzip()
+    get_file(link_plik_płaski)
+    unzip()
     json_file = str(data) + ".json"
     sprawdz_kontrahentow(json_file)
 

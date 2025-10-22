@@ -368,28 +368,36 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
 
     return s
 
-def export_grouped_excels(df:pd.DataFrame, out_dir: str,nazwa_spolki: str) -> dict[str, str]:
+from pathlib import Path
+from datetime import datetime
+import pandas as pd
+
+def export_grouped_excels(df: pd.DataFrame, out_dir: str, nazwa_spolki: str) -> dict[str, str]:
     data_folder = datetime.now().strftime("%d-%m-%Y")
-    base_path = Path(out_dir)/nazwa_spolki/data_folder
+    base_path = Path(out_dir) / nazwa_spolki / data_folder
     base_path.mkdir(parents=True, exist_ok=True)
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    wanted = ["Numer dokumentu","Data wystawienia","Netto","VAT","Brutto"]
+    wanted = ["Numer dokumentu", "Data wystawienia", "Netto", "VAT", "Brutto"]
 
-    # do skonczenia, poprawić zamianę daty na nr faktury
-    # z 11-10-2025 00:00:00 na 11/10/2025
+    if "Data wystawienia" in df.columns:
+        try:
+            df["Data wystawienia"] = pd.to_datetime(df["Data wystawienia"], errors="coerce", dayfirst=True)
+            df["Data wystawienia"] = df["Data wystawienia"].dt.strftime("%d.%m.%Y")
+        except Exception as e:
+            print(f"[WARN] Problem z konwersją 'Data wystawienia': {e}")
 
-    df["Data wystawienia"] = df["Data wystawienia"].dt.strftime("%d.%m.%Y")
-    df = convert_dates_to_strings(df, "Numer dokumentu")
-    #df["Numer dokumentu"] = df["Numer dokumentu"].apply(convert_dates_to_strings)
+    if "Numer dokumentu" in df.columns:
+        df = convert_dates_to_strings(df, "Numer dokumentu")
 
     cols = [c for c in wanted if c in df.columns]
     if not cols:
         raise ValueError("Brak kolumn do eksportu raportów - sprawdź nazwy w dataframe.")
-    out_map: dict[str, str] = {}
-    g = df.groupby("NIP",dropna=False,as_index=False)
 
-    for nip,sub in g:
+    out_map: dict[str, str] = {}
+    g = df.groupby("NIP", dropna=False, as_index=False)
+
+    for nip, sub in g:
         nip_str = str(nip).strip()
         kontrahent = ""
         if "Kontrahent" in sub.columns and not sub["Kontrahent"].isna().all():
@@ -669,11 +677,11 @@ def db_execute(query: str, params: tuple):
 
 def nr_konta_z_bazy(nip: str):
     nip_num = int(nip_digits(nip))
-    rec = db_fetchone("SELECT nr_konta FROM merchanci WHERE nip = %s", (nip_num,))
-    if rec and rec.get("nr_konta"):
-        return rec["nr_konta"]
+    rec = db_fetchone("SELECT nr_konta_sm FROM merchanci WHERE nip = %s", (nip_num,))
+    if rec and rec.get("nr_konta_sm"):
+        return rec["nr_konta_sm"]
     else:
-        print(f"Brak nr konta w bazie dla nipu :{nip}")
+        print(f"Brak nr konta w bazie dla NIP: {nip}")
         return None
 
 def zapisz_adres_do_bazy(nip: str, adres: str):
@@ -795,9 +803,9 @@ def Sha512HashNIP(nip: str, data: str, iters: int = 5000) -> str:
 
 def data_from_db() -> Dict[str, str]:
     query = """
-    SELECT nip::text AS nip, nr_konta
+    SELECT nip::text AS nip, nr_konta_sm
     FROM merchanci
-    WHERE nip IS NOT NULL AND nr_konta IS NOT NULL;
+    WHERE nip IS NOT NULL AND nr_konta_sm IS NOT NULL;
     """
     result = {}
     with db_conn() as conn:
@@ -1394,7 +1402,7 @@ def przetworz_plik_xlsx(
 
         df_rep = df.copy()
         # Data wpływu jako string YYYYMMDD do grupowania
-        df_rep["__wplyw_str"] = df_rep["Data wpływu"].map(_safe_yyyymmdd)
+        df_rep["__wplyw_str"] = df_rep["Data wystawienia"].map(_safe_yyyymmdd)
         # NIP oczyszczony z niedozwolonych znaków (10 cyfr albo pusty)
         df_rep["__nip_clean"] = df_rep["NIP"].astype(str).str.replace(r"\D", "", regex=True)
 
@@ -1409,13 +1417,13 @@ def przetworz_plik_xlsx(
         )
 
         # Format daty w raporcie jako YYYY-MM-DD (czytelniejsze) i kolumny wyjściowe w żądanej kolejności
-        raport["Data wpływu"] = pd.to_datetime(raport["__wplyw_str"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
+        raport["Data wystawienia"] = pd.to_datetime(raport["__wplyw_str"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
         raport["NIP"] = raport["__nip_clean"]
         raport["Kontrahent"] = raport["Kontrahent"]
         raport["Kwota Brutto"] = (raport["Suma_Brutto_gr"] / 100).round(2)
 
-        raport = raport[["Data wpływu", "NIP", "Kontrahent", "Kwota Brutto"]].sort_values(
-            ["Data wpływu", "NIP", "Kontrahent"])
+        raport = raport[["Data wystawienia", "NIP", "Kontrahent", "Kwota Brutto"]].sort_values(
+            ["Data wystawienia", "NIP", "Kontrahent"])
 
         raport.to_csv(merged_csv, index=False, encoding="utf-8-sig")
         print(f"[RAPORT] zapisany raport do pliku: {merged_csv}")
