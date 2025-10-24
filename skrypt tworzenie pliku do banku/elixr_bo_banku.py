@@ -41,7 +41,10 @@ from selenium.webdriver.common.by import By
 # zmienić zapis przelewów do podfolderów DONE
 # dodać kod sprawdzający czy kontrahent jest na białęj liscie DONE
 # dodać generowanie raportów ( do wysyłki emailem do kontrahenta) 1/2 DONE
-# ogarnąć formatownaie daty jako nr dokumentu
+# ogarnąć formatownaie daty jako nr dokumentu DONE
+
+# TODO 3:
+# zmienić sposób generownaia pliku tj zamienić nazwę kontrahenta z pliku na nazwę z bazy danych
 
 
 #######################
@@ -276,17 +279,16 @@ def validate_df(
 
 
 def sanitize_text(text: str) -> str:
-    """Tekst bez przecinków/cudzysłowów i śmieci – bezpieczny do ELIXIR-0."""
+    """Tekst bez przecinków/cudzysłowów i śmieci – bezpieczny do ELIXIR-0 (max 32 znaki)."""
     if text is None:
         return ""
     t = _elixir_safe_text(text)
-    # usuń znaki kłopotliwe dla ELIXIR-0:
-    bad = ',*"\'\r\n\t;!+?#'   # DODANE: przecinek i cudzysłowy
+    bad = ',*"\'\r\n\t;!+?#'   # niedozwolone znaki
     t = "".join(c for c in str(t) if c not in bad)
-    # zredukuj spacje, usuń spacje wokół '|'
     t = " ".join(t.split())
     t = re.sub(r'\s*\|\s*', '|', t).strip('| ')
-    return t
+    # stałe ograniczenie długości
+    return t[:32]
 
 def add_days_to_date_str(date_str: str, days: int) -> str:
     """Dodaje dni do daty (YYYYMMDD) i zwraca (YYYYMMDD)."""
