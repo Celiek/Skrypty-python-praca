@@ -362,6 +362,96 @@ def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
             result[str(row["nip"])] = row["status"]
     return result
 
+def zapisz_faktury_do_bazy(df: pd.DataFrame, company: str):
+    """
+    Zapisuje faktury do bazy (tabela: faktury),
+    pomijając duplikaty po (id_kontrahenta, numer_faktury, kwoty).
+    Tworzy raport CSV z pominiętymi rekordami.
+    """
+    if df.empty:
+        logging.info("[DB] Brak danych do zapisania.")
+        return
+
+    df = df.copy()
+    df["NIP"] = df["NIP"].astype(str).str.replace(r"\D", "", regex=True)
+
+    duplikaty = []
+    zapisane = 0
+    pominiete = 0
+
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # pobierz wszystkie istniejące rekordy (klucz unikalności)
+        cur.execute("""
+            SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto
+            FROM faktury
+        """)
+        existing = {
+            (str(r["id_kontrahenta"]), str(r["numer_faktury"]).strip(),
+             float(r["kwota_netto"]), float(r["kwota_vat"]), float(r["kwota_brutto"]))
+            for r in cur.fetchall()
+        }
+
+        for _, row in df.iterrows():
+            nip = row.get("NIP")
+            if not nip or not nip.isdigit():
+                continue
+
+            cur.execute("SELECT id FROM merchanci WHERE nip = %s", (nip,))
+            kontr = cur.fetchone()
+            if not kontr:
+                logging.warning(f"[DB] Pominięto fakturę – brak kontrahenta o NIP={nip}")
+                pominiete += 1
+                continue
+
+            id_kontrahenta = str(kontr["id"])
+            numer = str(row.get("Numer dokumentu")).strip()
+            if not numer:
+                continue
+
+            # wartości finansowe
+            try:
+                netto = round(Decimal(str(row["Netto"]).replace(",", ".")), 2)
+                vat = round(Decimal(str(row["VAT"]).replace(",", ".")), 2)
+                brutto = round(Decimal(str(row["Brutto"]).replace(",", ".")), 2)
+            except Exception:
+                logging.warning(f"[DB] Nie udało się sparsować kwot dla {numer}")
+                continue
+
+            key = (id_kontrahenta, numer, float(netto), float(vat), float(brutto))
+            if key in existing:
+                duplikaty.append({
+                    "nip": nip, "numer_faktury": numer,
+                    "netto": netto, "vat": vat, "brutto": brutto
+                })
+                continue
+
+            # data
+            data_wyst = pd.to_datetime(row.get("Data wystawienia"), errors="coerce")
+            if pd.isna(data_wyst):
+                data_wyst = datetime.today().date()
+
+            cur.execute("""
+                INSERT INTO faktury (
+                    numer_faktury, data_wystawienia,
+                    kwota_netto, kwota_vat, kwota_brutto,
+                    typ_faktury, id_kontrahenta
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (numer, data_wyst, netto, vat, brutto, "POJEDYNCZA", id_kontrahenta))
+            zapisane += 1
+            existing.add(key)
+
+        conn.commit()
+
+    # raport duplikatów
+    if duplikaty:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"duplikaty_faktury_{company}_{ts}.csv"
+        pd.DataFrame(duplikaty).to_csv(path, index=False, encoding="utf-8-sig")
+        logging.info(f"[DB] Raport duplikatów zapisany: {path}")
+
+    logging.info(f"[DB] ✅ Zapisano {zapisane} nowych faktur, pominięto {pominiete} bez kontrahenta, "
+                 f"{len(duplikaty)} duplikatów.")
+
 # def fetch_emails(nipy) -> pd.DataFrame:
 #     """Zwraca DF kolumny: nip, email (dla listy NIP-ów)."""
 #     if isinstance(nipy, pd.Series):
