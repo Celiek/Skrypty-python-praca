@@ -5,15 +5,13 @@ import os
 import random
 import re
 import shutil
-
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections import Counter
 from collections import defaultdict
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from pathlib import Path
 from typing import Optional, Dict, List
 
 import pandas as pd
@@ -964,6 +962,91 @@ def sprawdz_excelowe_kontrahenty(json_file: str, excel_file: str):
     print(f"[WL] Sprawdzono kontrahentów: brak wpisu w pliku MF dla {len(brakujace)} pozycji.")
     return brakujace
 
+def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame):
+    """
+    Zapisuje faktury do bazy danych (przed zapisem
+    sprawdza czy nie ma w nich powtórek  albo złych wartości)
+    :param wynik_faktur:
+    :param df:
+    :return:
+    """
+    if df_to_db.empty:
+        logging.info("[DB] Brak danych do zapisania w bazie.")
+        return
+
+    df_to_db = df_to_db.copy()
+
+    # --- Kolumna z czystym NIP-em ---
+    if "__nip_two" in df_to_db.columns:
+        df_to_db.loc[:, "__nip_clean"] = (
+            df_to_db["__nip_two"].astype(str).str.replace(r"\D", "", regex=True)
+        )
+    else:
+        raise ValueError("Brak kolumny __nip_two w DataFrame – nie można przypisać kontrahenta.")
+
+    # --- Połączenie z bazą ---
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+        # pobierz aktualne rekordy (unikalne kombinacje)
+        cur.execute("""
+                SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto
+                FROM faktury
+            """)
+        existing = {
+            (str(row["id_kontrahenta"]), str(row["numer_faktury"]).strip(),
+             float(row["kwota_netto"]), float(row["kwota_vat"]), float(row["kwota_brutto"]))
+            for row in cur.fetchall()
+        }
+
+        inserted = 0
+        skipped = 0
+
+        for _, row in df_to_db.iterrows():
+            numer_faktury = str(row["Numer dokumentu"]).strip()
+            data_wystawienia = pd.to_datetime(row["Data wystawienia"], dayfirst=True, errors="coerce").date()
+            kw_netto = round(Decimal(row["__netto_gr"]) / 100, 2)
+            kw_vat = round(Decimal(row["__vat_gr"]) / 100, 2)
+            kw_brutto = round(Decimal(row["__brutto_gr"]) / 100, 2)
+            typ_faktury = "POJEDYNCZA"
+
+            # znajdź kontrahenta po NIP
+            nip = row["__nip_clean"]
+            cur.execute("SELECT id FROM merchanci WHERE nip = %s", (nip,))
+            kontrahent = cur.fetchone()
+            if not kontrahent:
+                skipped += 1
+                logging.warning(f"[DB] Pominięto fakturę {numer_faktury} (NIP={nip}) – brak kontrahenta w merchanci.")
+                continue
+
+            id_kontrahenta = kontrahent["id"]
+
+            # sprawdź, czy duplikat już istnieje w bazie
+            key = (str(id_kontrahenta), numer_faktury, float(kw_netto), float(kw_vat), float(kw_brutto))
+            if key in existing:
+                skipped += 1
+                logging.info(f"[DB] Pominięto duplikat: {numer_faktury} (NIP={nip})")
+                continue
+
+            # jeśli nie istnieje → dodaj
+            cur.execute("""
+                    INSERT INTO faktury (
+                        numer_faktury, data_wystawienia,
+                        kwota_netto, kwota_vat, kwota_brutto,
+                        typ_faktury, id_kontrahenta
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (
+                numer_faktury, data_wystawienia,
+                kw_netto, kw_vat, kw_brutto,
+                typ_faktury, id_kontrahenta
+            ))
+
+            existing.add(key)  # żeby nie dodać duplikatu w tym samym przebiegu
+            inserted += 1
+
+        conn.commit()
+        print(f"[DB] Zapisano {inserted} nowych faktur, pominięto {skipped} duplikatów.")
+
 # =========================
 # Scraper REGON (Selenium)
 # =========================
@@ -1258,6 +1341,7 @@ def przetworz_plik_xlsx(
     headless: bool = True,
     merged_csv: Optional[str] = None,
     per_group_dir: Optional[str] = None,
+    save_db: bool = False,
 ):
     # --- walidacja spółki / nadawcy ---
     key = company.strip().lower()
@@ -1356,6 +1440,13 @@ def przetworz_plik_xlsx(
         axis=1
     )
 
+
+    df_to_db = df[["Numer dokumentu","Data wystawienia","__netto_gr","__vat_gr","__brutto_gr","__nip_two"]]
+
+    if not df.empty:
+        logging.info("[DB] Zapisuję dane faktur do bazy danych...")
+        zapisz_faktury_do_bazy(df)
+
     # --- agregacja: kontrahent/dzień (data wpływu) ---
     df_day = df.loc[df["__data_str"].notna()].copy()
     agg = (
@@ -1371,6 +1462,7 @@ def przetworz_plik_xlsx(
             cnt_rows    =("Brutto", "size"),
         )
     )
+
     # kwoty w groszach po sumowaniu w PLN
     agg["suma_brutto_gr"] = agg["suma_brutto"].apply(money_to_grosze)
     agg["suma_vat_gr"]    = agg["suma_vat"].apply(money_to_grosze)
@@ -1388,11 +1480,6 @@ def przetworz_plik_xlsx(
     missing = required - set(agg.columns)
     if missing:
         raise RuntimeError(f"Brakuje kolumn w 'agg': {missing}")
-
-    # --- (opcjonalnie) raport zbiorczy ---
-    # if merged_csv:
-    #     agg.to_csv(merged_csv, index=False, encoding="utf-8-sig")
-    #     print(f"[RAPORT] Zapisano raport scalonych grup: {merged_csv}")
 
     if merged_csv:
         # Bezpieczna serializacja "Data wpływu" -> YYYYMMDD
@@ -1590,6 +1677,24 @@ def przetworz_plik_xlsx(
         total_saved += len(day_lines)
 
     print(f"[ELIXIR] Łącznie zapisanych rekordów (wszystkie dni): {total_saved}")
+    # zapis faktur do bazy danych
+    # if getattr(args, "save_db", False):
+    #     try:
+    #         logging.info("[DB] Rozpoczynam zapis faktur do bazy...")
+    #         # przygotuj dane: df - wszystkie faktury, wynik_faktur - dane do bazy
+    #         wynik_faktur = []
+    #         for _, row in agg.iterrows():
+    #             wynik_faktur.append({
+    #                 "ok": True,
+    #                 "nip": str(row["nip_clean"]),
+    #                 "id": str(row["first_doc"]),
+    #             })
+    #         _ = zapisz_faktury_do_bazy(wynik_faktur, df)
+    #     except Exception as e:
+    #         logging.error("[DB] Błąd zapisu faktur do bazy: %s", e)
+    # else:
+    #     logging.info("[DB] Pominięto zapis do bazy (brak flagi --save-db).")
+
 
 # --- CLI aplikacji ---
 if __name__ == "__main__":
@@ -1610,6 +1715,7 @@ if __name__ == "__main__":
                         help="Ścieżka zbiorczego CSV z raportem scalonych grup (domyślnie: ./raport_scalonych_<ts>.csv)")
     parser.add_argument("--per-group-dir",
                         help="Katalog na osobne CSV per kontrahent/per data; jeśli nie podasz – nie tworzy.")
+    parser.add_argument("--save-db",action="store_true",help="zapisuje faktury do bazy danych jako ich status jako opłacony")
     args = parser.parse_args()
 
     przetworz_plik_xlsx(
@@ -1620,4 +1726,5 @@ if __name__ == "__main__":
         headless=args.headless,
         merged_csv=args.merged_csv,
         per_group_dir=args.per_group_dir,
+        save_db = args.save_db
     )

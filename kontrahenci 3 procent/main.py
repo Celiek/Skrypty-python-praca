@@ -812,6 +812,8 @@ def build_recipients_send_only(df: pd.DataFrame,
     out = out[out["email"].str.contains(r"@")]
     return out
 
+def save_faktury_to_db ():
+    return
 
 def dodaj_faktury(spolka: str, items: List[Dict], sell_date: Optional[str] = None) -> List[Dict]:
 
@@ -1047,6 +1049,7 @@ def czytaj_plik(
     dry_run: bool = False,
     sell_date: Optional[str] = None,   # 🔹 nowy parametr
 ) -> Optional[pd.DataFrame]:
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # 1) Wczytaj główny plik (źródłowe faktury)
