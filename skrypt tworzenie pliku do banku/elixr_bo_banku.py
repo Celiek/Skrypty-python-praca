@@ -5,6 +5,7 @@ import os
 import random
 import re
 import shutil
+import string
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections import Counter
@@ -802,23 +803,33 @@ def Sha512HashNIP(nip: str, data: str, iters: int = 5000) -> str:
     return h
 
 def data_from_db() -> Dict[str, str]:
-    query = """
-    SELECT nip::text AS nip, nr_konta_sm
-    FROM merchanci
-    WHERE nip IS NOT NULL AND nr_konta_sm IS NOT NULL;
-    """
-    result = {}
-    with db_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query)
-            for row in cur.fetchall():
-                nip_raw = str(row["nip"]).strip()
-                # usuń ".0" z końca, jeśli jest
-                if nip_raw.endswith(".0"):
-                    nip_raw = nip_raw[:-2]
-                nip_clean = clean_nip(nip_raw)
-                konto_clean = clean_konto(row["nr_konta"])
-                result[nip_clean] = konto_clean
+
+    try:
+        print("[DEBUG] Pobieram nipy i nr kont z merchanci:" )
+        query = """
+        SELECT nip, nr_konta_sm
+        FROM merchanci
+        WHERE nip IS NOT NULL AND nr_konta_sm IS NOT NULL;
+        """
+        result = {}
+
+        with db_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query)
+                for row in cur.fetchall():
+                    nip_raw = str(row["nip"]).strip()
+
+                    if nip_raw.endswith(".0"):
+                        nip_raw = nip_raw[:-2]
+                    nip_clean = clean_nip(nip_raw)
+                    konto_clean = clean_konto(row["nr_konta_sm"])
+                    result[nip_clean] = konto_clean
+
+    except Exception as e:
+        import traceback
+        print("[X] Błąd w data_from_db:", e)
+        traceback.print_exc()
+        return {}
 
     print(f"[DB] Pobranie {len(result)} rekordów z merchanci.")
     return result
@@ -884,7 +895,10 @@ def apply_mask(nr_konta: str, maska: str) -> str:
 
 def porownaj_nipy(file_path: str):
     nipy_excel = load_nipy_z_excela(file_path)
-    nipy_db = set(data_from_db().keys())
+
+
+    print("[DB] nipy z bazy danych :")
+    print(nipy_db)
 
     wspolne = nipy_excel & nipy_db
     tylko_w_excelu = nipy_excel - nipy_db
@@ -962,14 +976,15 @@ def sprawdz_excelowe_kontrahenty(json_file: str, excel_file: str):
     print(f"[WL] Sprawdzono kontrahentów: brak wpisu w pliku MF dla {len(brakujace)} pozycji.")
     return brakujace
 
-def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame):
+#dodać zapis nazwy spolki do bazy danych
+def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame,spolka: str):
     """
     Zapisuje faktury do bazy danych (przed zapisem
-    sprawdza czy nie ma w nich powtórek  albo złych wartości)
-    :param wynik_faktur:
-    :param df:
-    :return:
+    sprawdza czy nie ma w nich powtórek  albo złych wartości),
+    zapisane faktury mają oznaczenie z jakiej spółki są opłacane
     """
+
+
     if df_to_db.empty:
         logging.info("[DB] Brak danych do zapisania w bazie.")
         return
@@ -989,12 +1004,13 @@ def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame):
 
         # pobierz aktualne rekordy (unikalne kombinacje)
         cur.execute("""
-                SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto
-                FROM faktury
-            """)
+               SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto, nazwa_spolki
+               FROM faktury
+           """)
         existing = {
             (str(row["id_kontrahenta"]), str(row["numer_faktury"]).strip(),
-             float(row["kwota_netto"]), float(row["kwota_vat"]), float(row["kwota_brutto"]))
+             float(row["kwota_netto"]), float(row["kwota_vat"]), float(row["kwota_brutto"]),
+             row.get("nazwa_spolki"))
             for row in cur.fetchall()
         }
 
@@ -1020,32 +1036,33 @@ def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame):
 
             id_kontrahenta = kontrahent["id"]
 
-            # sprawdź, czy duplikat już istnieje w bazie
-            key = (str(id_kontrahenta), numer_faktury, float(kw_netto), float(kw_vat), float(kw_brutto))
+            # sprawdź, czy duplikat już istnieje w bazie (łącznie z nazwą spółki)
+            key = (str(id_kontrahenta), numer_faktury, float(kw_netto),
+                   float(kw_vat), float(kw_brutto), spolka)
             if key in existing:
                 skipped += 1
-                logging.info(f"[DB] Pominięto duplikat: {numer_faktury} (NIP={nip})")
+                logging.info(f"[DB] Pominięto duplikat: {numer_faktury} (NIP={nip}, spółka={spolka})")
                 continue
 
             # jeśli nie istnieje → dodaj
             cur.execute("""
-                    INSERT INTO faktury (
-                        numer_faktury, data_wystawienia,
-                        kwota_netto, kwota_vat, kwota_brutto,
-                        typ_faktury, id_kontrahenta
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (
+                   INSERT INTO faktury (
+                       numer_faktury, data_wystawienia,
+                       kwota_netto, kwota_vat, kwota_brutto,
+                       typ_faktury, id_kontrahenta, nazwa_spolki
+                   )
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               """, (
                 numer_faktury, data_wystawienia,
                 kw_netto, kw_vat, kw_brutto,
-                typ_faktury, id_kontrahenta
+                typ_faktury, id_kontrahenta, spolka
             ))
 
-            existing.add(key)  # żeby nie dodać duplikatu w tym samym przebiegu
+            existing.add(key)
             inserted += 1
 
         conn.commit()
-        print(f"[DB] Zapisano {inserted} nowych faktur, pominięto {skipped} duplikatów.")
+        logging.info(f"[DB] ✅ Zapisano {inserted} nowych faktur, pominięto {skipped} duplikatów.")
 
 # =========================
 # Scraper REGON (Selenium)
@@ -1445,7 +1462,7 @@ def przetworz_plik_xlsx(
 
     if not df.empty:
         logging.info("[DB] Zapisuję dane faktur do bazy danych...")
-        zapisz_faktury_do_bazy(df)
+        zapisz_faktury_do_bazy(df,company)
 
     # --- agregacja: kontrahent/dzień (data wpływu) ---
     df_day = df.loc[df["__data_str"].notna()].copy()
@@ -1594,6 +1611,7 @@ def przetworz_plik_xlsx(
 
                 day_key = row["__data_str"]  # YYYYMMDD
                 lines_by_day[day_key].append(line)
+
     except WebDriverException as e:
         print(f"[SCRAPER] Błąd Selenium: {e}. Kontynuuję bez scrapera (adresy mogą być surowe).")
         # awaryjnie bez adresów z REGON – generuj analogicznie
