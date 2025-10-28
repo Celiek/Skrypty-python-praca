@@ -257,6 +257,80 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str) -> dict[str, str]:
 
     return out_map
 
+# zapisuje do relacyjnej bazy faktury na bazie których wystawiona jest faktura 3%
+# "łączy" pojedyńcze faktury w jedną fakturę
+def zapisz_powiazania_do_bazy(df: pd.DataFrame, wyniki: List[Dict], spolka: str):
+    """
+    Zapisuje powiązania między fakturami cząstkowymi (z df)
+    a fakturami zbiorczymi (z listy `wyniki`).
+    """
+    if not wyniki:
+        logging.warning("[POWIAZANIA] Brak faktur zbiorczych do powiązania.")
+        return
+
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        dodane = 0
+        pominiete = 0
+
+        for w in wyniki:
+            if not w.get("ok"):
+                continue
+            nip = str(w.get("nip", "")).strip()
+            inv_id = w.get("id")
+            if not nip or not inv_id:
+                continue
+
+            # pobierz id faktury zbiorczej z tabeli faktury (dopasowanie po numerze lub id z API)
+            cur.execute("""
+                SELECT id_faktury
+                FROM faktury
+                WHERE nazwa_spolki = %s
+                  AND id_faktury = %s
+            """, (spolka, inv_id))
+            zbiorcza = cur.fetchone()
+            if not zbiorcza:
+                logging.warning(f"[POWIAZANIA] Nie znaleziono faktury zbiorczej (id={inv_id}) dla {nip}")
+                continue
+
+            id_faktury_zbiorczej = zbiorcza["id_faktury"]
+
+            # znajdź faktury cząstkowe tego kontrahenta (źródłowe faktury)
+            czastkowe = df.loc[df["NIP"].astype(str).str.replace(r"\D", "", regex=True) == nip]
+            if czastkowe.empty:
+                logging.warning(f"[POWIAZANIA] Brak faktur cząstkowych dla {nip}")
+                continue
+
+            for _, row in czastkowe.iterrows():
+                numer = str(row.get("Numer dokumentu")).strip()
+                if not numer:
+                    continue
+
+                cur.execute("""
+                    SELECT id_faktury FROM faktury
+                    WHERE numer_faktury = %s
+                """, (numer,))
+                czastkowa = cur.fetchone()
+                if not czastkowa:
+                    pominiete += 1
+                    logging.warning(f"[POWIAZANIA] Nie znaleziono faktury cząstkowej: {numer}")
+                    continue
+
+                id_faktury_skladnikowej = czastkowa["id_faktury"]
+
+                # wstaw do tabeli faktura_powiazania
+                try:
+                    cur.execute("""
+                        INSERT INTO faktura_powiazania (id_faktury_zbiorczej, id_faktury_skladnikowej)
+                        VALUES (%s, %s)
+                        ON CONFLICT (id_faktury_zbiorczej, id_faktury_skladnikowej) DO NOTHING
+                    """, (id_faktury_zbiorczej, id_faktury_skladnikowej))
+                    dodane += 1
+                except Exception as e:
+                    logging.error(f"[POWIAZANIA] Błąd przy zapisie powiązania: {e}")
+
+        conn.commit()
+        logging.info(f"[POWIAZANIA] Dodano {dodane} powiązań, pominięto {pominiete}.")
+
 
 def prepare_recipients(rows_from_build: List[Dict], wyniki_faktur: List[Dict], attachments_by_nip: Dict[str, str]) -> pd.DataFrame:
     df_rows = pd.DataFrame(rows_from_build)
@@ -365,8 +439,8 @@ def fetch_statusy_kontrahentow(nipy: List[str]) -> Dict[str, str]:
 def zapisz_faktury_do_bazy(df: pd.DataFrame, company: str):
     """
     Zapisuje faktury do bazy (tabela: faktury),
-    pomijając duplikaty po (id_kontrahenta, numer_faktury, kwoty).
-    Tworzy raport CSV z pominiętymi rekordami.
+    pomijając duplikaty po (id_kontrahenta, numer_faktury, kwoty, nazwa_spolki).
+    Dodaje nazwę spółki z parametru `company`
     """
     if df.empty:
         logging.info("[DB] Brak danych do zapisania.")
@@ -380,14 +454,15 @@ def zapisz_faktury_do_bazy(df: pd.DataFrame, company: str):
     pominiete = 0
 
     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        # pobierz wszystkie istniejące rekordy (klucz unikalności)
+        # pobierz istniejące rekordy
         cur.execute("""
-            SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto
+            SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto, nazwa_spolki
             FROM faktury
         """)
         existing = {
             (str(r["id_kontrahenta"]), str(r["numer_faktury"]).strip(),
-             float(r["kwota_netto"]), float(r["kwota_vat"]), float(r["kwota_brutto"]))
+             float(r["kwota_netto"]), float(r["kwota_vat"]),
+             float(r["kwota_brutto"]), str(r.get("nazwa_spolki", "")).strip())
             for r in cur.fetchall()
         }
 
@@ -396,6 +471,7 @@ def zapisz_faktury_do_bazy(df: pd.DataFrame, company: str):
             if not nip or not nip.isdigit():
                 continue
 
+            # znajdź kontrahenta
             cur.execute("SELECT id FROM merchanci WHERE nip = %s", (nip,))
             kontr = cur.fetchone()
             if not kontr:
@@ -417,11 +493,16 @@ def zapisz_faktury_do_bazy(df: pd.DataFrame, company: str):
                 logging.warning(f"[DB] Nie udało się sparsować kwot dla {numer}")
                 continue
 
-            key = (id_kontrahenta, numer, float(netto), float(vat), float(brutto))
+            # klucz unikalności uwzględniający spółkę
+            key = (id_kontrahenta, numer, float(netto), float(vat), float(brutto), company)
             if key in existing:
                 duplikaty.append({
-                    "nip": nip, "numer_faktury": numer,
-                    "netto": netto, "vat": vat, "brutto": brutto
+                    "nip": nip,
+                    "numer_faktury": numer,
+                    "netto": netto,
+                    "vat": vat,
+                    "brutto": brutto,
+                    "spolka": company
                 })
                 continue
 
@@ -430,28 +511,33 @@ def zapisz_faktury_do_bazy(df: pd.DataFrame, company: str):
             if pd.isna(data_wyst):
                 data_wyst = datetime.today().date()
 
+            # zapis do bazy
             cur.execute("""
                 INSERT INTO faktury (
                     numer_faktury, data_wystawienia,
                     kwota_netto, kwota_vat, kwota_brutto,
-                    typ_faktury, id_kontrahenta
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (numer, data_wyst, netto, vat, brutto, "POJEDYNCZA", id_kontrahenta))
-            zapisane += 1
+                    typ_faktury, id_kontrahenta, nazwa_spolki
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                numer, data_wyst, netto, vat, brutto,
+                "POJEDYNCZA", id_kontrahenta, company
+            ))
+
             existing.add(key)
+            zapisane += 1
 
         conn.commit()
 
-    # raport duplikatów
+    # raport
     if duplikaty:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = f"duplikaty_faktury_{company}_{ts}.csv"
-        pd.DataFrame(duplikaty).to_csv(path, index=False, encoding="utf-8-sig")
-        logging.info(f"[DB] Raport duplikatów zapisany: {path}")
+        dup_path = f"duplikaty_faktury_{company}_{ts}.csv"
+        pd.DataFrame(duplikaty).to_csv(dup_path, index=False, encoding="utf-8-sig")
+        logging.info(f"[DB] Raport duplikatów zapisany: {dup_path}")
 
     logging.info(f"[DB] ✅ Zapisano {zapisane} nowych faktur, pominięto {pominiete} bez kontrahenta, "
                  f"{len(duplikaty)} duplikatów.")
-
 # def fetch_emails(nipy) -> pd.DataFrame:
 #     """Zwraca DF kolumny: nip, email (dla listy NIP-ów)."""
 #     if isinstance(nipy, pd.Series):
@@ -1137,7 +1223,8 @@ def czytaj_plik(
     invoices_only: bool = False,
     recipients_file: Optional[str] = None,
     dry_run: bool = False,
-    sell_date: Optional[str] = None,   # 🔹 nowy parametr
+    sell_date: Optional[str] = None,
+    save_db: bool = False,
 ) -> Optional[pd.DataFrame]:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1183,6 +1270,19 @@ def czytaj_plik(
         if not w["ok"]:
             logging.error("   NIP=%s → %s", w["nip"], w.get("error"))
 
+    if save_db:
+        try:
+            logging.info("[DB] Rozpoczynam zapis faktur do bazy dla spółki: %s", spolka)
+            zapisz_faktury_do_bazy(df, company=spolka)
+            logging.info("[DB] Zapis faktur do bazy zakończony.")
+
+            # zapis faktur łączonych do bazy danych
+            logging.info("[POWIAZANIA] Tworzenie powiązań faktur zbiorczych z cząstkowymi...")
+            zapisz_powiazania_do_bazy(df, wyniki, spolka)
+
+        except Exception as e:
+            logging.error("[DB] Błąd podczas zapisu faktur do bazy: %s", e)
+
     # 5) TRYB INVOICES-ONLY (tylko faktury, bez maili)
     if invoices_only:
         os.environ["INVOICES_ONLY"] = "1"
@@ -1201,10 +1301,7 @@ def czytaj_plik(
 
         # budowanie raportu per kontrahent
         raport_dir = "raporty_xlsx"
-        xlsx_map = export_grouped_excels(df, out_dir=raport_dir)
         logging.info("[EXPORT] Zapisano raporty kontrahentów do folderu: %s", raport_dir)
-
-        all_attach_map = combine_attachments(xlsx_map, pdf_map)
 
         # zapis raportu zbiorczego
         if output_file:
@@ -1258,6 +1355,8 @@ if __name__ == "__main__":
     parser.add_argument("--sell-date", help="Data sprzedaży (YYYY-MM-DD) przekazywana do API Fakturownia", default=None)
     parser.add_argument("--invoices-only", action="store_true",
                         help="Wystawia faktury, ale nie wysyła maili.")
+    parser.add_argument("--save-db", action="store_true",
+                        help="Zapisuje faktury do bazy danych")
     args = parser.parse_args()
 
     czytaj_plik(
@@ -1269,7 +1368,8 @@ if __name__ == "__main__":
         invoices_only=args.invoices_only,
         recipients_file=args.recipients,
         dry_run=args.dry_run,
-        sell_date=args.sell_date
+        sell_date=args.sell_date,
+        save_db = args.save_db
     )
 
 # python main.py dane.xlsx -c shumee --invoices-only
