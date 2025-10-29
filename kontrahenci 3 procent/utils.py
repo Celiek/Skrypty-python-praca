@@ -1,8 +1,13 @@
 import os
-import re
-import unicodedata
 import psycopg2
+import unicodedata
+from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
+
+
+
+load_dotenv()
+
 
 _WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
 _WINDOWS_RESERVED = {
@@ -39,3 +44,68 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
 def _safe_name(name: str) -> str:
     name = (name or "").strip() or "plik"
     return re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .")[:150] or "plik"
+
+import re
+
+def clean_nip(nip_raw: str) -> str:
+    """
+    Normalizuje format NIP:
+    - usuwa prefiksy PL, spacje, myślniki, kropki,
+    - konwertuje na 10-cyfrowy ciąg,
+    - usuwa końcówkę .0 (z Excela),
+    - dodaje wiodące zera jeśli długość < 10.
+    """
+    if not nip_raw:
+        return ""
+
+    nip = str(nip_raw).strip().upper()
+    nip = nip.replace("PL", "")
+    nip = nip.replace(" ", "").replace("-", "").replace(".", "")
+    nip = re.sub(r"[^\d]", "", nip)  # zostaw tylko cyfry
+
+    # usuń końcówkę .0 (np. "1234567890.0")
+    if nip.endswith("0") and "." in str(nip_raw):
+        nip = nip.split(".")[0]
+
+    # dopasuj długość do 10 znaków (np. "12345678" -> "0012345678")
+    if len(nip) < 10 and nip.isdigit():
+        nip = nip.zfill(10)
+
+    # obetnij do 10 cyfr (czasem Excel zapisze coś w stylu "1234567890123")
+    if len(nip) > 10:
+        nip = nip[:10]
+
+    return nip
+
+def clean_address(raw_addr: str) -> str:
+    """
+    Normalizuje adresy kontrahentów:
+    - usuwa wielokrotne separatory '|' i '-'
+    - usuwa podwójne spacje, taby i znaki specjalne
+    - zachowuje polskie znaki
+    - usuwa leading/trailing spacje
+    """
+    if not raw_addr:
+        return ""
+
+    addr = str(raw_addr).strip()
+
+    # usuń powtórzenia separatorów
+    addr = re.sub(r"[|]+", ", ", addr)
+    addr = re.sub(r"[-]{2,}", "-", addr)
+
+    # usuń niepotrzebne znaki nowej linii, taby itp.
+    addr = re.sub(r"[\r\n\t]+", " ", addr)
+
+    # usuń powtórzenia przecinków / spacji
+    addr = re.sub(r"\s{2,}", " ", addr)
+    addr = re.sub(r",\s*,", ",", addr)
+
+    # usuń zbędne znaki na końcu
+    addr = addr.strip(" ,;-")
+
+    # zamiana na Unicode NFC (żeby polskie znaki były jednolite)
+    addr = unicodedata.normalize("NFC", addr)
+
+    # limit długości (Fakturownia ma ograniczenia)
+    return addr[:250]
