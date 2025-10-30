@@ -1,13 +1,19 @@
-import os
 import logging
-import pandas as pd
+import os
 from argparse import ArgumentParser
-from dotenv import load_dotenv
 from datetime import date
 
+import pandas as pd
+from dotenv import load_dotenv
+
+from db_ops import (
+    insert_new_invoices_from_xlsx,
+    zapisz_faktury_prowizje,
+    zapisz_powiazania,
+    get_addresses_from_db
+)
 from fakturownia_api import get_faktur, dodaj_faktury
 from reports import export_grouped_excels
-from db_ops import zapisz_faktury_do_bazy, zapisz_powiazania_do_bazy, get_addresses_from_db
 from utils import clean_nip
 
 # === Konfiguracja logowania ===
@@ -19,7 +25,7 @@ logging.basicConfig(
 # === Wczytanie zmiennych środowiskowych ===
 load_dotenv()
 if not os.getenv("API_KEY"):
-    raise RuntimeError("❌ Brak API_KEY w pliku .env!")
+    raise RuntimeError("[API] Brak API_KEY w pliku .env!")
 
 # === Ustawienia identyfikatorów departamentów Fakturownia ===
 DEPARTMENT_ID = {
@@ -42,18 +48,22 @@ if __name__ == "__main__":
 
     # === Wczytanie danych z pliku Excel ===
     if not os.path.exists(args.input):
-        raise FileNotFoundError(f"❌ Nie znaleziono pliku: {args.input}")
+        raise FileNotFoundError(f"[FILE] Nie znaleziono pliku: {args.input}")
 
     df = pd.read_excel(args.input)
     if df.empty:
-        raise ValueError("❌ Plik wejściowy jest pusty!")
+        raise ValueError("[FILE] Plik wejściowy jest pusty!")
 
     logging.info(f"✅ Wczytano {len(df)} rekordów z pliku {args.input}")
 
+    # === Zapisz faktury źródłowe (kontrahentów) ===
+    insert_new_invoices_from_xlsx(args.input, args.company)
+
+    # === Pobierz adresy kontrahentów z bazy ===
     adresy_z_bazy = get_addresses_from_db()
     logging.info(f"[DB] Załadowano {len(adresy_z_bazy)} adresów z tabeli merchanci.")
 
-    # === Mapowanie kolumn (na wypadek różnych nazw) ===
+    # === Mapowanie nazw kolumn (na wypadek różnych nazw w Excelu) ===
     column_aliases = {
         "kwota netto": "Netto",
         "wartość netto": "Netto",
@@ -68,7 +78,7 @@ if __name__ == "__main__":
     df.columns = [column_aliases.get(c.lower().strip(), c) for c in df.columns]
     df["NIP"] = df["NIP"].astype(str).apply(clean_nip)
 
-    # === Uzupełnij brakujące kolumny, jeśli trzeba ===
+    # === Uzupełnij brakujące kolumny ===
     for col in ["Netto", "VAT", "Brutto"]:
         if col not in df.columns:
             df[col] = 0
@@ -77,7 +87,7 @@ if __name__ == "__main__":
     logging.info("[RAPORT] Tworzenie raportów XLSX per kontrahent...")
     xlsx_map = export_grouped_excels(df, out_dir="raporty_xlsx")
 
-    # === Przygotowanie danych do wystawienia faktur ===
+    # === Grupowanie po NIP + wyliczenie 3% prowizji ===
     df["Netto"] = pd.to_numeric(df["Netto"], errors="coerce").fillna(0)
     grouped = df.groupby(["NIP", "Kontrahent"], as_index=False)["Netto"].sum()
 
@@ -88,35 +98,35 @@ if __name__ == "__main__":
     grouped["amount_net"] = (grouped["Netto"] * grouped["stawka_proc"]).round(2)
     grouped["amount_gross"] = (grouped["amount_net"] * 1.23).round(2)
 
+    # === Budowanie listy pozycji dla Fakturowni ===
     items = []
     for _, r in grouped.iterrows():
         nip_clean = str(r["NIP"]).strip()
         items.append({
             "buyer_name": str(r["Kontrahent"]).strip(),
             "buyer_tax_no": nip_clean,
-            "buyer_address": adresy_z_bazy.get(nip_clean, ""),  # <-- tu dopisujemy adres z bazy
+            "buyer_address": adresy_z_bazy.get(nip_clean, ""),  # adres z bazy
             "amount_net": str(r["amount_net"]),
             "amount_gross": str(r["amount_gross"]),
         })
 
     logging.info(f"[FAKTUROWNIA] Przygotowano {len(items)} faktur do wystawienia.")
 
-    # === Wystawianie faktur przez API Fakturownia ===
+    # === Wystawianie faktur prowizyjnych przez API ===
     dept_id = DEPARTMENT_ID.get(company, 1732019)
     wyniki = dodaj_faktury(company, items, dept_id)
     sukcesy = sum(1 for w in wyniki if w.get("ok"))
-    logging.info(f"[FAKTUROWNIA] Wystawiono {sukcesy} faktur.")
+    logging.info(f"[FAKTUROWNIA] Wystawiono {sukcesy} faktur prowizyjnych.")
 
-    # === Zapis do bazy danych ===
-    if args.save_db:
-        logging.info("[DB] Zapis faktur do bazy danych...")
-        zapisz_faktury_do_bazy(df, company)
-        zapisz_powiazania_do_bazy(df, wyniki, company)
+    # === Zapis faktur prowizyjnych i powiązań ===
+    zapisz_faktury_prowizje(wyniki, args.company)
+    zapisz_powiazania(df, wyniki)
 
-    # === Pobieranie wystawionych faktur z Fakturowni ===
+    # === Pobranie wystawionych faktur z Fakturowni ===
     if args.invoices_only:
         today = date.today().isoformat()
         logging.info(f"[POBIERANIE] Pobieram faktury z dnia {today}...")
-        get_faktur(date_from=today, date_to=today)
+        filtered, pobrane = get_faktur(date_from=today, date_to=today)
+        zapisz_faktury_prowizje(filtered, company)
 
     logging.info("=== Zakończono działanie programu ===")

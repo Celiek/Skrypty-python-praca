@@ -56,6 +56,7 @@ def clean_nip(nip_raw: str) -> str:
     - dodaje wiodące zera jeśli długość < 10.
     """
     if not nip_raw:
+        print("[DEBUG] BRAK NIPÓW")
         return ""
 
     nip = str(nip_raw).strip().upper()

@@ -5,7 +5,6 @@ import os
 import random
 import re
 import shutil
-import string
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
 from collections import Counter
