@@ -4,15 +4,15 @@ import pandas as pd
 # na podstawie jednej kolumny
 
 # === Wczytaj pliki ===
-brakujace = pd.read_excel("brakujace_w_b.xlsx")
-plik_c = pd.read_excel("great przelewy 07.10.25 po deduplikacji2 (1).xlsx")
+brakujace = pd.read_excel("miedzieńskioptima.xlsx")
+plik_c = pd.read_excel("report_invoices_20251016 (6).xlsx")
 
 # === Normalizacja kolumn ===
 brakujace.columns = brakujace.columns.str.strip().str.lower()
 plik_c.columns = plik_c.columns.str.strip().str.lower()
 
 # === Nazwa kolumny, po której porównujemy (np. 'a') ===
-col = 'nip'
+col = 'Numer dokumentu'
 
 # === Sprawdzenie: które z wartości w pliku brakującym występują w pliku C ===
 w_c = brakujace[brakujace[col].isin(plik_c[col])]

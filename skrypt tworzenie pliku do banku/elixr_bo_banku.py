@@ -1,6 +1,6 @@
 import hashlib
-import json
 import logging
+import math
 import os
 import random
 import re
@@ -25,6 +25,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+
+import json
 
 # TODO
 # Dodać nie branie pod uwagę faktur testowych - Status PREMERCHANT  DONE
@@ -119,6 +121,136 @@ OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
 # Normalizacja / kodowanie
 # =========================
 
+def _yyyymmdd_to_iso(d) -> str:
+    """
+    Przyjmuje YYYYMMDD (str/int) i zwraca YYYY-MM-DD.
+    Zwraca "" gdy brak lub format niepoprawny.
+    """
+    if d is None:
+        return ""
+    if isinstance(d, float) and math.isnan(d):
+        return ""
+    s = str(d).strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return ""
+
+def _to_float0(x) -> float:
+    """Float z NaN -> 0.0."""
+    try:
+        v = float(x)
+        if math.isnan(v):
+            return 0.0
+        return v
+    except Exception:
+        return 0.0
+
+def _to_int0(x) -> int:
+    """Int z NaN/None -> 0."""
+    try:
+        if x is None:
+            return 0
+        if isinstance(x, float) and math.isnan(x):
+            return 0
+        return int(x)
+    except Exception:
+        try:
+            # czasem mamy np. '123.0'
+            return int(float(x))
+        except Exception:
+            return 0
+
+def build_json_przelew_company_nip(df: pd.DataFrame,
+                                   agg: pd.DataFrame,
+                                   company_key: str) -> dict:
+    """
+    JSON:
+      meta: company, generated_at, source_columns
+      groups: 1 wpis = 1 (NIP/nazwa) x 1 data_wystawienia,
+              sumy + lista pozycji (faktur) z tego dnia
+    Zakłada, że:
+      df ma: __grp_key, __data_str
+      agg ma: __grp_key, __data_str, data_platnosci, nip_clean, kontrahent,
+              suma_netto, suma_vat, suma_brutto, suma_*_gr
+    """
+    payload = {
+        "meta": {
+            "company": company_key,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_columns": list(df.columns),
+        },
+        "groups": []
+    }
+
+    cols_needed = ["__grp_key", "__data_str", "Numer dokumentu", "Data wystawienia",
+                   "Netto", "VAT", "Brutto", "NIP", "Kontrahent"]
+    missing = [c for c in cols_needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Brak kolumn w df: {missing}")
+
+    df_idx = df[cols_needed].copy()
+
+    def _yyyymmdd_to_iso(d: str) -> str:
+        d = str(d)
+        return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+    for _, row in agg.iterrows():
+        grp_key  = str(row["__grp_key"])
+        data_str = str(row["__data_str"])  # YYYYMMDD
+        iso_date = _yyyymmdd_to_iso(data_str)
+
+        sub = df_idx[(df_idx["__grp_key"] == grp_key) & (df_idx["__data_str"] == data_str)].copy()
+
+        items = []
+        for _, r in sub.iterrows():
+            items.append({
+                "numer_dokumentu": str(r["Numer dokumentu"]),
+                "data_wystawienia": "" if pd.isna(r["Data wystawienia"]) else str(r["Data wystawienia"]),
+                "netto": float(r["Netto"]),
+                "vat": float(r["VAT"]),
+                "brutto": float(r["Brutto"]),
+                "nip": "" if pd.isna(r.get("NIP")) else str(r.get("NIP")),
+                "kontrahent": "" if pd.isna(r.get("Kontrahent")) else str(r.get("Kontrahent")),
+            })
+
+        group_entry = {
+            "group_id": f"{company_key}:{(row.get('nip_clean') or 'NAME')}:{data_str}",
+            "nip": "" if pd.isna(row.get("nip_clean")) else str(row.get("nip_clean")),
+            "kontrahent": "" if pd.isna(row.get("kontrahent")) else str(row.get("kontrahent")),
+            "data_wystawienia": iso_date,
+            "data_platnosci": _yyyymmdd_to_iso(str(row.get("data_platnosci"))),
+            "suma": {
+                "netto": float(row.get("suma_netto") or 0.0),
+                "vat": float(row.get("suma_vat") or 0.0),
+                "brutto": float(row.get("suma_brutto") or 0.0),
+                "netto_gr": int(row.get("suma_netto_gr") or 0),
+                "vat_gr": int(row.get("suma_vat_gr") or 0),
+                "brutto_gr": int(row.get("suma_brutto_gr") or 0),
+            },
+            "pozycje": items
+        }
+        payload["groups"].append(group_entry)
+
+    return payload
+
+
+def save_grouped_json(df: pd.DataFrame,
+                      agg: pd.DataFrame,
+                      company_key: str,
+                      base_dir: str = "json") -> str:
+    """
+    Zapis do: json/<firma>/<YYYY-MM-DD>/<firma>_przelewy_<YYYY-MM-DD>.json
+    Zwraca pełną ścieżkę.
+    """
+    payload = build_json_przelew_company_nip(df, agg, company_key)
+    out_date = datetime.now().strftime("%Y-%m-%d")
+    out_dir = Path(base_dir) / company_key / out_date
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = out_dir / f"{company_key}_przelewy_{out_date}.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return str(out_path)
 # --- WALIDACJA DANYCH ---
 
 def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
@@ -308,6 +440,7 @@ def sanitize_nazwa_folderu(text: str) -> str:
 # ===========================================
 # Utils
 # ===========================================
+
 def convert_dates_to_strings(df, column_name):
     """Zamienia tylko wartości typu datetime na stringi w formacie DD/MM/YYYY"""
     if column_name not in df.columns:
@@ -609,6 +742,18 @@ def is_blank(s: str | None) -> bool:
 # DB helpers
 # =========================
 
+# DOkończyć
+
+def nipy_db():
+    query = """
+        SELECT NIP from merchanci where NIP IS NOT NULL;
+    """
+    with db_conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            results = cursor.fetchall()
+    return results
+
 def clean_invoice_id(s: str) -> str:
     current_year = datetime.now().year
     s = re.sub(rf"\b{current_year}\b", "", s)
@@ -895,7 +1040,6 @@ def apply_mask(nr_konta: str, maska: str) -> str:
 def porownaj_nipy(file_path: str):
     nipy_excel = load_nipy_z_excela(file_path)
 
-
     print("[DB] nipy z bazy danych :")
     print(nipy_db)
 
@@ -1045,18 +1189,18 @@ def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame,spolka: str):
 
             # jeśli nie istnieje → dodaj
             cur.execute("""
-                   INSERT INTO faktury (
-                       numer_faktury, data_wystawienia,
-                       kwota_netto, kwota_vat, kwota_brutto,
-                       typ_faktury, id_kontrahenta, nazwa_spolki
-                   )
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-               """, (
+                INSERT INTO faktury (
+                    numer_faktury, data_wystawienia,
+                    kwota_netto, kwota_vat, kwota_brutto,
+                    typ_faktury, id_kontrahenta, nazwa_spolki
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (numer_faktury) DO NOTHING
+            """, (
                 numer_faktury, data_wystawienia,
                 kw_netto, kw_vat, kw_brutto,
                 typ_faktury, id_kontrahenta, spolka
             ))
-
             existing.add(key)
             inserted += 1
 
@@ -1175,7 +1319,7 @@ def csv_quote(s: str) -> str:
 
 def nazwa_z_bazy(nip: str) -> str | None:
     nip_num = int(nip_digits(nip))
-    rec = db_fetchone("SELECT nazwa FROM Merchanci WHERE nip = %s", (nip_num,))
+    rec = db_fetchone("SELECT nazwa FROM merchanci WHERE nip = %s", (nip_num,))
     if rec and rec.get("nazwa"):
         return cut_to_30(sanitize_text(rec["nazwa"]))
     return None
@@ -1496,6 +1640,9 @@ def przetworz_plik_xlsx(
     missing = required - set(agg.columns)
     if missing:
         raise RuntimeError(f"Brakuje kolumn w 'agg': {missing}")
+
+    json_path = save_grouped_json(df, agg, key, base_dir="json")
+    print(f"[JSON] Zapisano plik: {json_path}")
 
     if merged_csv:
         # Bezpieczna serializacja "Data wpływu" -> YYYYMMDD

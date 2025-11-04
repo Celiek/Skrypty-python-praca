@@ -1,12 +1,12 @@
 import pandas as pd
 import os
 import time
-
-input_file = "great 08-09 (1).xlsx"
+#"shumee przelewy problemy.xlsx"
+input_file = "zakup test folder 27.10 great (1).xlsx"
 
 # wczytanie pliku
 df = pd.read_excel(input_file, dtype=str)
-print(df.head())
+# print(df.head())
 print("Kolumny w pliku:", df.columns.tolist())
 
 # czyszczenie pól
@@ -22,8 +22,11 @@ for col in ["NIP", "Numer dokumentu"]:
 
 df["NIP"] = df["NIP"].str.replace(r"\D", "", regex=True)
 
+
 # sprawdzanie duplikatów
 dups = df[df.duplicated(subset=["NIP", "Numer dokumentu", "Brutto", "Netto"], keep=False)]
+df_clean = df.drop_duplicates(subset=["NIP", "Numer dokumentu", "Brutto", "Netto"])
+
 
 if dups.empty:
     print("[DUP] Brak duplikatów!")
@@ -42,6 +45,9 @@ else:
     # zapis do XLSX
     out_xlsx = os.path.join("dup", f"duplikaty_{ts}.xlsx")
     dups.to_excel(out_xlsx, index=False)
+
+    #czysty plik 
+    df_clean.to_excel("czysty_plik_shumee.xlsx",index=False)
 
     print(f"[DUP] Raporty zapisane:")
     print(f" ├─ CSV : {out_csv}")

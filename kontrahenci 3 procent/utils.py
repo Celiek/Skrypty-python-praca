@@ -3,7 +3,7 @@ import psycopg2
 import unicodedata
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
-
+import re
 
 
 load_dotenv()
@@ -45,7 +45,6 @@ def _safe_name(name: str) -> str:
     name = (name or "").strip() or "plik"
     return re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .")[:150] or "plik"
 
-import re
 
 def clean_nip(nip_raw: str) -> str:
     """

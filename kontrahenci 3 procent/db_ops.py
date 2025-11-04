@@ -1,10 +1,11 @@
 import logging
 import os
 from decimal import Decimal
+
 import pandas as pd
-from dotenv import load_dotenv
 import requests
-from fakturownia_api import get_invoice_number_from_api
+from dotenv import load_dotenv
+
 from utils import db_conn
 
 load_dotenv()
@@ -228,7 +229,7 @@ def zapisz_faktury_prowizje(wyniki, company):
                 try:
                     cur.execute("""
                         INSERT INTO faktury_prowizje (
-                            id_faktury_fakturownia,
+                            id_fakturowni,
                             numer_faktury,
                             data_wystawienia,
                             kwota_netto,
@@ -286,7 +287,7 @@ def zapisz_powiazania(df, wyniki):
                 cur.execute("""
                     SELECT id_faktury_prowizji 
                     FROM faktury_prowizje
-                    WHERE id_faktury_fakturownia = %s;
+                    WHERE id_fakturowni = %s;
                 """, (faktura_api_id,))
                 prow = cur.fetchone()
 
@@ -340,3 +341,44 @@ def zapisz_powiazania(df, wyniki):
         conn.commit()
 
     logging.info(f"[POWIAZANIA] ✅ Dodano {dodane} powiązań, pominięto {pominiete}.")
+# funkcja sprawdza czy w bazie nie ma faktur cząstkowych na bazie któych zostały wystawione faktury
+# 3%
+def sprawdz_powielone_faktury(conn, df):
+    """
+    Sprawdza, czy kontrahenci (po NIP) mają już wystawione faktury prowizyjne,
+    czyli ich faktury źródłowe są już powiązane w tabeli 'powiazania_faktur'.
+    Zwraca listę NIP-ów do pominięcia.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT f.nip
+        FROM faktury_prowizje f
+        JOIN powiazania_faktur p ON f.id_faktury_prowizji = p.id_faktury_prowizji
+        WHERE f.nip IS NOT NULL;
+    """)
+
+    rows = cur.fetchall()
+
+    nipy_powiazane = set()
+    for row in rows:
+        if isinstance(row, dict):
+            nip_val = row.get("nip")
+        else:
+            nip_val = row[0]
+        if nip_val:
+            nip_clean = str(nip_val).replace("PL", "").replace(" ", "").strip()
+            nipy_powiazane.add(nip_clean)
+
+    duplikaty = []
+    for _, row in df.iterrows():
+        nip = str(row.get("NIP", "")).replace("PL", "").replace(" ", "").strip()
+        if nip in nipy_powiazane:
+            duplikaty.append(nip)
+
+    if duplikaty:
+        logging.warning(
+            f"[DUPLIKATY] ⚠️ Pominięto {len(duplikaty)} kontrahentów, którzy mają już wystawioną fakturę prowizyjną.")
+    else:
+        logging.info("[DUPLIKATY] ✅ Brak wcześniej rozliczonych kontrahentów.")
+
+    return duplikaty
