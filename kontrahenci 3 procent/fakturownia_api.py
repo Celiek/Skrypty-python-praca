@@ -16,6 +16,20 @@ FAKTUROWNIA_URL = os.getenv("FAKTUROWNIA_URL", "https://shumee.fakturownia.pl")
 FAKTUROWNIA_API = os.getenv("FAKTUROWNIA_API", "https://shumee.fakturownia.pl")
 FAKTUROWNIA_TOKEN = os.getenv("FAKTUROWNIA_TOKEN")
 
+MIESIACE_PL = {
+    "January": "styczeń",
+    "February": "luty",
+    "March": "marzec",
+    "April": "kwiecień",
+    "May": "maj",
+    "June": "czerwiec",
+    "July": "lipiec",
+    "August": "sierpień",
+    "September": "wrzesień",
+    "October": "październik",
+    "November": "listopad",
+    "December": "grudzień"
+}
 
 def parse_address(addr: str):
     """Rozdziela adres z bazy (np. 'ul. Warszawska 12 | 00-123 Warszawa') na street, post_code, city."""
@@ -142,7 +156,7 @@ def parse_address(addr: str):
 
     return street, post_code, city
 
-def dodaj_faktury(spolka: str, items: list[dict], department_id: int) -> list[dict]:
+def dodaj_faktury(spolka: str, items: list[dict], department_id: int,issue_date: datetime.date) -> list[dict]:
     """
     Wystawia faktury przez API Fakturowni i zwraca ich pełne dane
     (z numerem faktury, kwotami i danymi kontrahenta).
@@ -181,7 +195,7 @@ def dodaj_faktury(spolka: str, items: list[dict], department_id: int) -> list[di
                 "invoice": {
                     "kind": "vat",
                     "issue_date": today.strftime("%Y-%m-%d"),
-                    "sell_date": today.strftime("%Y-%m-%d"),
+                    "sell_date": issue_date.strftime("%Y-%m-%d"),
                     "payment_to": payment_to.strftime("%Y-%m-%d"),
                     "department_id": department_id,
                     "buyer_name": it["buyer_name"],
@@ -191,7 +205,7 @@ def dodaj_faktury(spolka: str, items: list[dict], department_id: int) -> list[di
                     "buyer_post_code": post_code,
                     "buyer_city": city,
                     "positions": [{
-                        "name": f"Prowizja 3% od sprzedanych towarów za {poprzedni.strftime('%B %Y')}",
+                        "name": f"Prowizja 3% od sprzedanych towarów za {MIESIACE_PL[poprzedni.strftime('%B')]} {poprzedni.year}",
                         "tax": 23,
                         "total_price_gross": it["amount_gross"],
                         "total_price_net": it["amount_net"],
@@ -205,8 +219,6 @@ def dodaj_faktury(spolka: str, items: list[dict], department_id: int) -> list[di
                 if 200 <= r.status_code < 300:
                     data = r.json()
                     faktura_id = data.get("id")
-
-                    # 🔹 Dociągnij szczegóły, żeby mieć numer i kwoty
                     details = get_invoice_details(faktura_id)
 
                     results.append({

@@ -1,12 +1,15 @@
 import os
+
+import pandas as pd
 import psycopg2
 import unicodedata
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 import re
-
+import logging
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 _WINDOWS_FORBIDDEN = set('<>:"/\\|?*')
@@ -109,3 +112,31 @@ def clean_address(raw_addr: str) -> str:
 
     # limit długości (Fakturownia ma ograniczenia)
     return addr[:250]
+
+
+def clean_df(df : pd.DataFrame) -> pd.DataFrame:
+    # usuwa duplikaty z dataframe i je loguje
+    # na wejściu jest dataframe
+    # funkcja zwraca Datafram
+
+    df["NIP_clean"] = df["NIP"].apply(clean_nip)
+
+    subset_cols = ["Data wystawienia", "Numer dokumentu", "NIP_clean", "Netto", "VAT", "Brutto"]
+
+    # Znajdź duplikaty
+    dupes = df[df.duplicated(subset=subset_cols, keep=False)]
+
+    if not dupes.empty:
+        logging.warning(f"[DUPLIKATY] Wykryto {len(dupes)} rekordów powtarzających się.")
+        for _, row in dupes.iterrows():
+            logging.warning(
+                f"[DUPLIKAT] Faktura: {row['Numer dokumentu']} | "
+                f"NIP: {row['NIP_clean']} | "
+                f"Data: {row['Data wystawienia']} | Netto: {row['Netto']} | Brutto: {row['Brutto']}"
+            )
+    else:
+        logging.info("[DUPLIKATY] Brak powtórzonych faktur.")
+
+    # Usuń duplikaty (zostaw pierwsze wystąpienie)
+    df = df.drop_duplicates(subset=subset_cols, keep="first")
+    return df

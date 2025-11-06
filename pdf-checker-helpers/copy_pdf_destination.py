@@ -3,11 +3,9 @@ import shutil
 from pathlib import Path
 import os
 
-##kopiuje pliki pdf z jednego folderu
-
 # === KONFIGURACJA ===
-SOURCE_DIR = r"C:\Users\DELL\Desktop\shumee 04.11.2025\SHUMEE"    # folder główny (z podfolderami)
-DEST_DIR   = r"C:\Users\DELL\Desktop\shumee 04.11.2025\drop2"  # gdzie mają trafić PDF-y
+SOURCE_DIR = r"C:\Users\DELL\Sm Dropbox\Faktury kontrahentów\greatstore\4.11.2025\drop 1"    # folder główny (z podfolderami)
+DEST_DIR   = r"C:\Users\DELL\Sm Dropbox\Faktury kontrahentów\greatstore\4.11.2025\drop1_2"  # gdzie mają trafić PDF-y
 PRESERVE_STRUCTURE = False  # True = zachowaj strukturę podfolderów, False = wszystko do jednego folderu
 DRY_RUN = False              # True = tylko pokaże co by zrobił (bez kopiowania)
 
@@ -26,25 +24,24 @@ def copy_all_pdfs(source_dir: str, dest_dir: str, preserve_structure: bool = Fal
     for pdf_path in src.rglob("*.pdf"):
         total += 1
         try:
-            rel_path = pdf_path.relative_to(src)
+            parent_folder = pdf_path.parent.name  # nazwa folderu nadrzędnego
+            base_name = pdf_path.stem
+            ext = pdf_path.suffix
+            new_name = f"{base_name}_{parent_folder}{ext}"
+
             if preserve_structure:
-                # zachowaj strukturę podfolderów
-                target_path = dst / rel_path
+                rel_path = pdf_path.relative_to(src)
+                target_path = dst / rel_path.parent / new_name
                 target_path.parent.mkdir(parents=True, exist_ok=True)
             else:
-                # wszystko do jednego folderu
-                target_path = dst / pdf_path.name
+                target_path = dst / new_name
 
-                # jeśli już istnieje plik o tej nazwie — dopisz licznik
-                if target_path.exists():
-                    base, ext = os.path.splitext(pdf_path.name)
-                    counter = 1
-                    while True:
-                        new_name = f"{base}_{counter}{ext}"
-                        target_path = dst / new_name
-                        if not target_path.exists():
-                            break
-                        counter += 1
+            # jeśli istnieje plik o tej nazwie — dopisz licznik
+            counter = 1
+            while target_path.exists():
+                new_name = f"{base_name}_{parent_folder}_{counter}{ext}"
+                target_path = dst / new_name
+                counter += 1
 
             if dry_run:
                 print(f"[DRY-RUN] Skopiowałbym: {pdf_path} → {target_path}")

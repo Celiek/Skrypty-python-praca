@@ -1,9 +1,11 @@
 import logging
 import os
+import re
 from decimal import Decimal
 
 import pandas as pd
 import requests
+import unicodedata
 from dotenv import load_dotenv
 
 from utils import db_conn
@@ -75,7 +77,7 @@ def insert_new_invoices_from_xlsx(xlsx_path: str, company: str):
                     continue
 
                 # sprawdzenie duplikatu
-                cur.execute("SELECT 1 FROM faktury WHERE numer_faktury = %s", (numer,))
+                cur.execute("SELECT 1 FROM faktury_do_prowizji WHERE numer_faktury = %s", (numer,))
                 if cur.fetchone():
                     skipped += 1
                     continue
@@ -91,7 +93,7 @@ def insert_new_invoices_from_xlsx(xlsx_path: str, company: str):
                 data_wyst = pd.to_datetime(row["Data wystawienia"], errors="coerce").date()
 
                 cur.execute("""
-                    INSERT INTO faktury (numer_faktury, data_wystawienia,
+                    INSERT INTO faktury_do_prowizji (numer_faktury, data_wystawienia,
                                          kwota_netto, kwota_vat, kwota_brutto,
                                          typ_faktury, nazwa_spolki)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -164,7 +166,7 @@ def zapisz_powiazania_do_bazy(df, wyniki, company):
 
                     # 🔹 pobierz id faktury cząstkowej
                     cur.execute("""
-                        SELECT id_faktury FROM faktury WHERE numer_faktury = %s
+                        SELECT id_faktury FROM faktury_do_prowizji WHERE numer_faktury = %s
                     """, (numer_faktury_skladnikowej,))
                     res_skladnikowa = cur.fetchone()
                     if not res_skladnikowa:
@@ -196,6 +198,75 @@ def zapisz_powiazania_do_bazy(df, wyniki, company):
 
 FAKTUROWNIA_API = os.getenv("FAKTUROWNIA_API", "https://shumee.fakturownia.pl")
 FAKTUROWNIA_TOKEN = os.getenv("FAKTUROWNIA_TOKEN")
+
+
+import re
+
+
+### DO SPRAWDZENIA
+def get_names_from_db_for_nips(nips: list[str | int]) -> dict[str, str]:
+    """
+    Zwraca mapę {NIP: nazwa} dla podanych NIP-ów z tabeli `merchanci` (nip BIGINT).
+    Czyści nazwę z '|', różnych rodzajów myślników, i nadmiarowych spacji / znaków nowej linii.
+    """
+    from utils import db_conn
+    import logging
+
+    nips_bigint: list[int] = []
+    for x in nips:
+        try:
+            s = str(x).strip()
+            if s and s.replace(" ", "").isdigit():
+                nips_bigint.append(int(s))
+        except Exception:
+            continue
+
+    if not nips_bigint:
+        return {}
+
+    sql = """
+        SELECT nip, nazwa
+        FROM merchanci
+        WHERE nip = ANY(%s::bigint[])
+          AND nazwa IS NOT NULL
+    """
+
+    def _clean_name(name: str) -> str:
+        # oczyszcza nazwę z dziwnych znaków
+        # pobiera string z bazy
+        # zwraca oczyszczy string(adres)
+        if not name:
+            return ""
+
+        t = unicodedata.normalize("NFKC", str(name))
+        t = re.sub(r'^[\-\u2010\u2011\u2012\u2013\u2014\u2212\s]*\|+', '', t)
+        t = re.sub(r'[\-\u2010\u2011\u2012\u2013\u2014\u2212]', ' ', t)
+        t = re.sub(r'\s+', ' ', t).strip()
+        t = re.sub(r'(\b\d{2}) (\d{3}\b)', r'\1-\2', t)
+        t = re.sub(r'\s*\|\s*', '|', t)
+        t = t.strip('|')
+        return t
+
+    result: dict[str, str] = {}
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (nips_bigint,))
+            rows = cur.fetchall()
+
+            if not rows:
+                return {}
+
+            sample = rows[0]
+            if isinstance(sample, dict):  # RealDictCursor
+                for r in rows:
+                    result[str(r["nip"]).strip()] = _clean_name(str(r["nazwa"]))
+            else:
+                for nip_val, nazwa_val in rows:
+                    result[str(nip_val).strip()] = _clean_name(str(nazwa_val))
+
+    logging.info(f"[DB] Zmapowano nazwy z bazy dla {len(result)}/{len(nips_bigint)} NIP-ów.")
+    return result
 
 def get_invoice_details(invoice_id: int) -> dict:
     """Pobiera szczegóły faktury z API Fakturowni."""
@@ -313,7 +384,7 @@ def zapisz_powiazania(df, wyniki):
                         # znajdź fakturę źródłową po numerze
                         cur.execute("""
                             SELECT id_faktury 
-                            FROM faktury 
+                            FROM faktury_do_prowizji
                             WHERE numer_faktury = %s;
                         """, (numer_dokumentu,))
                         src = cur.fetchone()
@@ -341,6 +412,8 @@ def zapisz_powiazania(df, wyniki):
         conn.commit()
 
     logging.info(f"[POWIAZANIA] ✅ Dodano {dodane} powiązań, pominięto {pominiete}.")
+
+
 # funkcja sprawdza czy w bazie nie ma faktur cząstkowych na bazie któych zostały wystawione faktury
 # 3%
 def sprawdz_powielone_faktury(conn, df):
