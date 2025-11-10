@@ -1,8 +1,7 @@
 import logging
 import os
 from argparse import ArgumentParser
-from datetime import date
-
+from datetime import date, datetime
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -10,123 +9,220 @@ from db_ops import (
     insert_new_invoices_from_xlsx,
     zapisz_faktury_prowizje,
     zapisz_powiazania,
-    get_addresses_from_db
+    get_addresses_from_db,
+    sprawdz_powielone_faktury,
+    get_names_from_db_for_nips,
 )
 from fakturownia_api import get_faktur, dodaj_faktury
 from reports import export_grouped_excels
-from utils import clean_nip
+from utils import clean_nip, db_conn, clean_df
 
-# === Konfiguracja logowania ===
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
 
-# === Wczytanie zmiennych środowiskowych ===
+# ===== logging =====
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# ===== env =====
 load_dotenv()
 if not os.getenv("API_KEY"):
     raise RuntimeError("[API] Brak API_KEY w pliku .env!")
 
-# === Ustawienia identyfikatorów departamentów Fakturownia ===
+
 DEPARTMENT_ID = {
     "shumee": 1732019,
     "greatstore": 1705454,
     "extrastore": 1705460,
 }
 
-# === Główna logika ===
+SPECIAL_2PROC = {"6020134043"}  # NIP-y na 2%
+
+
+def parse_issue_date(arg_val: str | None) -> date:
+    if not arg_val:
+        return date.today()
+    try:
+        return datetime.strptime(arg_val, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"[CLI] Niepoprawny format daty: {arg_val}. Użyj RRRR-MM-DD.")
+
+
+# ✅ GŁÓWNA POPRAWKA — poprawne parsowanie dat z Excela = dd.mm.yyyy
+def parse_date_series(s: pd.Series) -> pd.Series:
+    """Wymuszone polskie daty dd.mm.yyyy"""
+    return pd.to_datetime(s.astype(str), errors="coerce", dayfirst=True)
+
+
+def build_items_from_merchants_and_invoices(df_faktury, df_merch, adresy_z_bazy):
+
+    df_faktury = df_faktury.copy()
+    df_merch = df_merch.copy()
+
+    # ✅ FIX: prawidłowe parsowanie Data wystawienia
+    df_faktury["Data wystawienia"] = parse_date_series(df_faktury["Data wystawienia"])
+    df_faktury["NIP"] = df_faktury["NIP"].astype(str).apply(clean_nip)
+
+    # ✅ FIX: prawidłowe parsowanie daty w filtrze
+    if "Od kiedy prowizja 3%" in df_merch.columns:
+        df_merch["Od kiedy prowizja 3%"] = parse_date_series(df_merch["Od kiedy prowizja 3%"])
+    else:
+        df_merch["Od kiedy prowizja 3%"] = pd.NaT
+
+    df_merch["NIP"] = df_merch["NIP"].astype(str).apply(clean_nip)
+
+    # Kwoty
+    for c in ["Netto", "VAT", "Brutto"]:
+        if c in df_faktury.columns:
+            df_faktury[c] = pd.to_numeric(df_faktury[c], errors="coerce").fillna(0)
+
+    # Sprawdź poprawność dat (debug)
+    logging.info("[DEBUG] Zakres dat wystawienia: %s → %s",
+                 df_faktury["Data wystawienia"].min(),
+                 df_faktury["Data wystawienia"].max())
+
+    # Tylko kontrahenci aktywni
+    today = pd.Timestamp(date.today())
+    aktywni = df_merch[df_merch["Od kiedy prowizja 3%"].isna() |
+                       (df_merch["Od kiedy prowizja 3%"] <= today)]
+
+    if aktywni.empty:
+        logging.warning("[FILTER] Brak kontrahentów spełniających kryteria 'Od kiedy prowizja 3%'.")
+        return []
+
+    # mapy
+    nazwy_map = dict(zip(aktywni["NIP"], aktywni.get("Nazwa", pd.Series([""] * len(aktywni)))))
+    email_map = dict(zip(aktywni["NIP"], aktywni.get("email", pd.Series([""] * len(aktywni)))))
+    start_map = dict(zip(aktywni["NIP"], aktywni["Od kiedy prowizja 3%"]))
+
+    # nazwy z DB
+    names_db = get_names_from_db_for_nips(list(start_map.keys()))
+
+    items = []
+
+    for nip, start_dt in start_map.items():
+        if pd.isna(start_dt):
+            continue
+
+        orig_start = start_dt
+
+        # Logika przesunięcia
+        if start_dt.day > 1:
+            start_dt = (start_dt + pd.offsets.MonthEnd(0)).replace(day=1) + pd.offsets.MonthBegin(1)
+            shifted = True
+        else:
+            start_dt = start_dt.replace(day=1)
+            shifted = False
+
+        sub = df_faktury[
+            (df_faktury["NIP"] == nip) &
+            (df_faktury["Data wystawienia"] >= start_dt)
+        ]
+
+        logging.info(f"[DEBUG] Faktury po {start_dt.date()} dla NIP {nip}: {len(sub)}")
+
+        if sub.empty:
+            logging.warning(f"[SKIP] Brak faktur dla NIP {nip} po {start_dt.date()}")
+            continue
+
+        suma_netto = float(sub["Netto"].sum())
+        if suma_netto <= 0:
+            continue
+
+        stawka = 0.02 if str(nip) in SPECIAL_2PROC else 0.03
+        amount_net = round(suma_netto * stawka, 2)
+        amount_gross = round(amount_net * 1.23, 2)
+
+        buyer_name = (
+            names_db.get(nip)
+            or str(nazwy_map.get(nip, "")).strip()
+            or (str(sub["Kontrahent"].iloc[0]).strip() if "Kontrahent" in sub.columns else "")
+        )
+
+        items.append({
+            "buyer_name": buyer_name,
+            "buyer_tax_no": nip,
+            "buyer_email": (str(email_map.get(nip, "")).strip() or None),
+            "buyer_address": adresy_z_bazy.get(str(nip), ""),
+            "amount_net": f"{amount_net:.2f}",
+            "amount_gross": f"{amount_gross:.2f}",
+        })
+
+    logging.info(f"[BUILD] Przygotowano {len(items)} kontrahentów do fakturowania.")
+    return items
+
+
+
+# ===================== MAIN ======================
+
 if __name__ == "__main__":
     parser = ArgumentParser(description="Automatyzacja faktur prowizyjnych 3% / 2%")
     parser.add_argument("input", help="Plik XLSX z fakturami cząstkowymi")
-    parser.add_argument("-c", "--company", required=True, help="Nazwa spółki: shumee / greatstore / extrastore")
-    parser.add_argument("--invoices-only", action="store_true", help="Tylko wystawia i pobiera faktury (bez maili)")
-    parser.add_argument("--save-db", action="store_true", help="Zapisuje faktury do bazy danych")
+    parser.add_argument("-c", "--company", required=True, help="Nazwa spółki")
+    parser.add_argument("--invoices-only", action="store_true")
+    parser.add_argument("--save-db", action="store_true")
+    parser.add_argument("--filter-xlsx", help="Plik XLSX z listą kontrahentów")
+    parser.add_argument("--issue-date", dest="issue_date")
+    parser.add_argument("--report-only",action="store_true",
+        help="Tylko generuj raporty XLSX — bez wystawiania faktur i bez zapisu do bazy"
+    )
     args = parser.parse_args()
 
     company = args.company.lower().strip()
     logging.info(f"=== Uruchamianie dla spółki: {company.upper()} ===")
 
-    # === Wczytanie danych z pliku Excel ===
-    if not os.path.exists(args.input):
-        raise FileNotFoundError(f"[FILE] Nie znaleziono pliku: {args.input}")
-
     df = pd.read_excel(args.input)
-    if df.empty:
-        raise ValueError("[FILE] Plik wejściowy jest pusty!")
+    df = clean_df(df)
 
-    logging.info(f"✅ Wczytano {len(df)} rekordów z pliku {args.input}")
+    # ✅ FIX: parsowanie wszystkich dat w fakturach
+    if "Data wystawienia" in df.columns:
+        df["Data wystawienia"] = parse_date_series(df["Data wystawienia"])
 
-    # === Zapisz faktury źródłowe (kontrahentów) ===
-    insert_new_invoices_from_xlsx(args.input, args.company)
-
-    # === Pobierz adresy kontrahentów z bazy ===
-    adresy_z_bazy = get_addresses_from_db()
-    logging.info(f"[DB] Załadowano {len(adresy_z_bazy)} adresów z tabeli merchanci.")
-
-    # === Mapowanie nazw kolumn (na wypadek różnych nazw w Excelu) ===
-    column_aliases = {
-        "kwota netto": "Netto",
-        "wartość netto": "Netto",
-        "netto (pln)": "Netto",
-        "kwota vat": "VAT",
-        "wartość vat": "VAT",
-        "vat (pln)": "VAT",
-        "kwota brutto": "Brutto",
-        "wartość brutto": "Brutto",
-        "brutto (pln)": "Brutto",
-    }
-    df.columns = [column_aliases.get(c.lower().strip(), c) for c in df.columns]
     df["NIP"] = df["NIP"].astype(str).apply(clean_nip)
 
-    # === Uzupełnij brakujące kolumny ===
+    adresy_z_bazy = get_addresses_from_db()
+
+    # filtr powielonych
+    with db_conn() as conn:
+        duplikaty = sprawdz_powielone_faktury(conn, df)
+
+    df = df[~df["NIP"].isin(duplikaty)]
+
     for col in ["Netto", "VAT", "Brutto"]:
         if col not in df.columns:
             df[col] = 0
 
-    # === Tworzenie raportów XLSX per kontrahent ===
-    logging.info("[RAPORT] Tworzenie raportów XLSX per kontrahent...")
-    xlsx_map = export_grouped_excels(df, out_dir="raporty_xlsx")
+    export_grouped_excels(df, spolka=company, out_root="raporty_xlsx")
 
-    # === Grupowanie po NIP + wyliczenie 3% prowizji ===
-    df["Netto"] = pd.to_numeric(df["Netto"], errors="coerce").fillna(0)
-    grouped = df.groupby(["NIP", "Kontrahent"], as_index=False)["Netto"].sum()
+    if args.report_only:
+        logging.info("[RAPORT] ✅ Zakończono — wygenerowano tylko raporty XLSX (bez wystawiania faktur).")
+        raise SystemExit(0)
 
-    # NIP-y z prowizją 2% (reszta 3%)
-    SPECIAL_2PROC = {"6020134043"}
-    grouped["stawka_proc"] = grouped["NIP"].apply(lambda x: 0.02 if str(x) in SPECIAL_2PROC else 0.03)
+    # ─────────────────────────────────────────────
+    # BUILDER ITEMS
+    # ─────────────────────────────────────────────
 
-    grouped["amount_net"] = (grouped["Netto"] * grouped["stawka_proc"]).round(2)
-    grouped["amount_gross"] = (grouped["amount_net"] * 1.23).round(2)
+    if args.filter_xlsx:
+        kontrahenci_df = pd.read_excel(args.filter_xlsx)
+        kontrahenci_df["NIP"] = kontrahenci_df["NIP"].astype(str).apply(clean_nip)
 
-    # === Budowanie listy pozycji dla Fakturowni ===
-    items = []
-    for _, r in grouped.iterrows():
-        nip_clean = str(r["NIP"]).strip()
-        items.append({
-            "buyer_name": str(r["Kontrahent"]).strip(),
-            "buyer_tax_no": nip_clean,
-            "buyer_address": adresy_z_bazy.get(nip_clean, ""),  # adres z bazy
-            "amount_net": str(r["amount_net"]),
-            "amount_gross": str(r["amount_gross"]),
-        })
+        # ✅ FIX — poprawne parsowanie dat w filtrze
+        if "Od kiedy prowizja 3%" in kontrahenci_df.columns:
+            kontrahenci_df["Od kiedy prowizja 3%"] = parse_date_series(
+                kontrahenci_df["Od kiedy prowizja 3%"]
+            )
 
-    logging.info(f"[FAKTUROWNIA] Przygotowano {len(items)} faktur do wystawienia.")
+        items = build_items_from_merchants_and_invoices(df, kontrahenci_df, adresy_z_bazy)
+    else:
+        raise RuntimeError("Musisz podać --filter-xlsx (lista kontrahentów).")
 
-    # === Wystawianie faktur prowizyjnych przez API ===
+    logging.info(f"[FAKTUROWNIA] Do wystawienia: {len(items)} faktur")
+
+    insert_new_invoices_from_xlsx(args.input, args.company)
+
+    issue_date = parse_issue_date(args.issue_date)
     dept_id = DEPARTMENT_ID.get(company, 1732019)
-    wyniki = dodaj_faktury(company, items, dept_id)
-    sukcesy = sum(1 for w in wyniki if w.get("ok"))
-    logging.info(f"[FAKTUROWNIA] Wystawiono {sukcesy} faktur prowizyjnych.")
 
-    # === Zapis faktur prowizyjnych i powiązań ===
+    wyniki = dodaj_faktury(company, items, dept_id, issue_date)
+
     zapisz_faktury_prowizje(wyniki, args.company)
     zapisz_powiazania(df, wyniki)
-
-    # === Pobranie wystawionych faktur z Fakturowni ===
-    if args.invoices_only:
-        today = date.today().isoformat()
-        logging.info(f"[POBIERANIE] Pobieram faktury z dnia {today}...")
-        filtered, pobrane = get_faktur(date_from=today, date_to=today)
-        zapisz_faktury_prowizje(filtered, company)
 
     logging.info("=== Zakończono działanie programu ===")

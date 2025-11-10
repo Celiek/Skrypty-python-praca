@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, List
+from bs4 import BeautifulSoup
 
 import pandas as pd
 import psycopg2
@@ -1207,29 +1208,47 @@ def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame,spolka: str):
         conn.commit()
         logging.info(f"[DB] ✅ Zapisano {inserted} nowych faktur, pominięto {skipped} duplikatów.")
 
-# =========================
-# Scraper REGON (Selenium)
-# =========================
+# ============================================
+# LOSOWE OPÓŹNIENIE
+# ============================================
 
+def losowe_opoznienie(min_sec=0.05, max_sec=0.25):
+    time.sleep(random.uniform(min_sec, max_sec))
+
+
+# ============================================
+# SCRAPER REGON (Selenium + BS4 + HTML do pamięci)
+# ============================================
 
 class RegonScraper:
     """Jedna przeglądarka na cały wsad."""
+
+    CHROMEDRIVER_PATH = os.getenv(
+        "CHROMEDRIVER_PATH",
+        r"C:\tools\chromedriver-win64\chromedriver.exe"
+    )
+
     def __init__(self, chromedriver_path: str = CHROMEDRIVER_PATH, headless: bool = True):
         self.chromedriver_path = chromedriver_path
         self.headless = headless
         self.driver = None
 
+        # HTML w pamięci
+        self.html = None
+        self.soup = None
+
     def __enter__(self):
         options = Options()
         if self.headless:
             options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920x1080")
-        options.add_argument("--log-level=3")
-        options.add_argument("--disable-logging")
-        options.add_argument("--silent")
-        options.add_experimental_option('excludeSwitches', ['enable-logging'])
-        service = Service(self.chromedriver_path,log_path=os.devnull)
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920x1080")
+            options.add_argument("--log-level=3")
+            options.add_argument("--disable-logging")
+            options.add_argument("--silent")
+            options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+        service = Service(self.chromedriver_path, log_path=os.devnull)
         self.driver = webdriver.Chrome(service=service, options=options)
         return self
 
@@ -1237,15 +1256,27 @@ class RegonScraper:
         if self.driver:
             self.driver.quit()
 
+    # ================================================
+    # GŁÓWNA FUNKCJA SCRAPERA – pobiera dane z tabeli
+    # ================================================
     def scrape_nip(self, nip: str) -> list[str]:
         d = self.driver
+
         d.get("https://wyszukiwarkaregon.stat.gov.pl/appBIR/index.aspx")
         losowe_opoznienie(0.05, 0.25)
-        d.find_element(By.ID, "txtNip").clear()
-        d.find_element(By.ID, "txtNip").send_keys(str(nip))
+
+        pole = d.find_element(By.ID, "txtNip")
+        pole.clear()
+        pole.send_keys(str(nip))
+
         d.find_element(By.ID, "btnSzukaj").click()
         losowe_opoznienie(0.15, 0.3)
 
+        # ✅ Zapisz HTML do pamięci
+        self.html = d.page_source
+        self.soup = BeautifulSoup(self.html, "html.parser")
+
+        # ✅ Znajdź wyniki
         rows = d.find_elements(By.CLASS_NAME, "tabelaZbiorczaListaJednostekAltRow") + \
                d.find_elements(By.CLASS_NAME, "tabelaZbiorczaListaJednostekRow")
 
@@ -1255,49 +1286,96 @@ class RegonScraper:
         cells = rows[0].find_elements(By.TAG_NAME, "td")
         return [c.text.strip() for c in cells]
 
+
+# ============================================
+# FILTRACJA WYNIKÓW SCRAPERA
+# ============================================
+
+def filter_wynik(wynik: list[str]) -> list[str]:
+    """Usuwa zbędne indeksy + ostatni element jeśli to ----------"""
+
+    if not wynik:
+        return []
+
+    # usuń określone pola
+    to_remove = {1, 2, 3, 5}
+    wynik = [v for i, v in enumerate(wynik) if i not in to_remove]
+
+    # usuń ostatni element jeśli to same kreski
+    if wynik and wynik[-1].strip("-").strip() == "":
+        wynik = wynik[:-1]
+
+    return wynik
+
+
+# ============================================
+# WYCIĄGANIE ADRESU
+# ============================================
+
 def wyciagnij_adres_z_komorek(cells: list[str]) -> str:
+    """Przekształca komórki scrapera na format: Ulica|Kod|Miasto|Gmina ..."""
+
     if not cells:
         return ""
+
+    # oryginalny zakres 5–8 (4 pola)
     start, end = 5, 9
-    frag = cells[start:end] if len(cells) >= end else cells[max(0, len(cells)-4):]
+
+    frag = cells[start:end] if len(cells) >= end else cells[max(0, len(cells) - 4):]
+
     if not frag:
         return ""
+
+    def sanitize_text(s: str) -> str:
+        return s.replace("\xa0", " ").strip()
+
     def clip35(s: str) -> str:
-        return s[:35]
-    return "|".join(clip35(sanitize_text(x)) for x in frag if x)
+        return sanitize_text(s)[:35]
 
-# =========================
-# Get-or-fetch (DB → scrape → DB)
-# =========================
+    return "|".join(clip35(x) for x in frag if x)
 
-def get_or_fetch_adres(nip_clean: str, scraper: "RegonScraper") -> str:
+
+# =====================================================
+#  GET-OR-FETCH (DB → scrape → DB)
+#  tutaj integrujesz swoje adres_z_bazy(), nazwa_z_bazy()
+# =====================================================
+
+def get_or_fetch_adres(nip_clean: str, scraper: RegonScraper) -> str:
+    """
+    1. Próbuje wziąć adres z DB
+    2. Jeśli brak → scrapuje REGON
+    3. Zapisuje do DB
+    """
     try:
-        # pobierz adres z bazy albo pusty
         adr = adres_z_bazy(nip_clean) or ""
-        # pobierz nazwę z bazy
         nazwa = nazwa_z_bazy(nip_clean) or ""
-        if not is_blank(adr):
+        if adr.strip():
             return f"{nazwa}|{adr}" if nazwa else adr
     except Exception as e:
-        print(f"[W] Błąd DB przy pobieraniu adresu/nazwy dla NIP {nip_clean}: {e}")
+        print(f"[W] DB error: {e}")
 
+    # SCRAPER
     try:
-        cells = scraper.scrape_nip(nip_clean)
-        losowe_opoznienie(0.09, 0.19)
-        adr = wyciagnij_adres_z_komorek(cells)
-        nazwa = nazwa_z_bazy(nip_clean) or ""  # jeszcze raz sprawdzimy
-        if not is_blank(adr):
+        raw_cells = scraper.scrape_nip(nip_clean)
+        losowe_opoznienie(0.1, 0.25)
+
+        adr = wyciagnij_adres_z_komorek(raw_cells)
+        nazwa = nazwa_z_bazy(nip_clean) or ""
+
+        if adr.strip():
             full_val = f"{nazwa}|{adr}" if nazwa else adr
             try:
                 zapisz_adres_do_bazy(nip_clean, adr)
             except Exception as e:
-                print(f"[W] Nie udało się zapisać adresu do DB dla NIP {nip_clean}: {e}")
+                print(f"[W] Nie zapisano do DB: {e}")
+
             return full_val
-        return nazwa or ""
-    except Exception as e:
-        print(f"[W] Błąd scrapera REGON dla NIP {nip_clean}: {e}")
+
         return nazwa or ""
 
+    except Exception as e:
+        print(f"[W] Błąd scrapera REGON: {e}")
+        return ""
 
 def get_or_fetch_konto(nip_clean: str) -> str:
     try:
@@ -1439,11 +1517,14 @@ def _group_key(row) -> str:
     name = str(row.get("Kontrahent", "")).strip().upper()
     return f"NAME::{name}"
 
-# bezpiecznie dodaje 30 dni do daty
-# używane do dodawania
+#######################################
+# Normalizacja dat do wysyłki przelewów
+#######################################
+
 def _safe_add30(s_min: str | None, s_max: str | None) -> str:
     base = s_max or s_min
     return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
+
 
 def gr_to_pln_comma(v_gr: int) -> str:
     v = int(v_gr)
@@ -1603,9 +1684,10 @@ def przetworz_plik_xlsx(
 
     df_to_db = df[["Numer dokumentu","Data wystawienia","__netto_gr","__vat_gr","__brutto_gr","__nip_two"]]
 
-    if not df.empty:
-        logging.info("[DB] Zapisuję dane faktur do bazy danych...")
-        zapisz_faktury_do_bazy(df,company)
+    #poprawić
+    # if not df.empty:
+    #     logging.info("[DB] Zapisuję dane faktur do bazy danych...")
+    #     zapisz_faktury_do_bazy(df,company)
 
     # --- agregacja: kontrahent/dzień (data wpływu) ---
     df_day = df.loc[df["__data_str"].notna()].copy()

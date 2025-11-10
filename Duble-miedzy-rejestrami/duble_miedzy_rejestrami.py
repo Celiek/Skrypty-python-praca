@@ -1,75 +1,114 @@
 import pandas as pd
+from rapidfuzz import distance
+
+# TODO
+# sprawdzać po kombinacjach kolumn nie po pojedyńczych
 
 # === KONFIGURACJA ===
-plik2 = "Shumee zrzut z optimy od sierpnia do pazdziernika.xlsx"
-plik1 = "Shumee przelewy 14.10.2025.xlsx"
-plik_wynikowy = "duplikaty shumee 14.10.25.xlsx"
+plik1 = "rejestrtestgreatstore.xlsx"
+plik2 = "zakupkrajgreatstore.xlsx"
+plik_wynikowy = "duplikaty_po_nip_i_kwotach_07.11.2025.xlsx"
 
-# Kolumny po których porównujemy
-kolumny_kluczowe = ['Netto', 'Brutto', 'Vat', 'Nip', 'Numer dokumentu']
+THRESHOLD_DIST = 4   # maksymalna różnica znaków w nazwie dokumentu
 
 # === 1. Wczytanie danych ===
 df1 = pd.read_excel(plik1)
 df2 = pd.read_excel(plik2)
 
-# === 2. Normalizacja nazw kolumn (na wszelki wypadek różne formaty) ===
-df1.columns = df1.columns.str.strip().str.lower()
-df2.columns = df2.columns.str.strip().str.lower()
-
-# Dopasowanie nazw do formatu porównawczego
-mapowanie = {
-    'netto': 'Netto',
-    'brutto': 'Brutto',
-    'vat': 'Vat',
-    'nip': 'Nip',
-    'numer dokumentu': 'Numer dokumentu',
-    "'numer dokumentu": 'Numer dokumentu'  # czasem Excel daje cudzysłów
-}
-
-df1 = df1.rename(columns=mapowanie)
-df2 = df2.rename(columns=mapowanie)
-
-# === 3. Usuwanie wierszy z brakami w kolumnach kluczowych ===
-df1 = df1.dropna(subset=kolumny_kluczowe)
-df2 = df2.dropna(subset=kolumny_kluczowe)
-
-# === 4. Konwersja typów i czyszczenie wartości ===
-def normalizuj(df):
+# === 2. Normalizacja minimalna ===
+def normalizuj_minimalnie(df):
     df = df.copy()
-    df['Nip'] = df['Nip'].astype(str).str.replace(r'\D', '', regex=True)  # tylko cyfry
-
-    for col in ['Netto', 'Brutto', 'Vat']:
+    df['NIP'] = df['NIP'].astype(str).str.replace(r'\D', '', regex=True)
+    for col in ['Netto', 'Brutto', 'VAT']:
         df[col] = (
-            df[col].astype(str)
+            df[col]
+            .astype(str)
             .str.replace(',', '.', regex=False)
-            .str.replace(r'\s+', '', regex=True)  # usuń spacje i taby z liczb
+            .str.replace(r'\s+', '', regex=True)
             .replace('', '0')
             .astype(float)
         )
-
-    # czyszczenie numeru dokumentu
-    df['Numer dokumentu'] = (
-        df['Numer dokumentu']
-        .astype(str)
-        .str.strip()                           # usuwa spacje z początku i końca
-        .str.replace(r'\s+', '', regex=True)   # usuwa spacje wewnątrz
-        .str.replace('\xa0', '', regex=False)  # usuwa niełamliwe spacje
-        .str.replace('\t', '', regex=False)    # usuwa tabulatory
-        .str.replace('\n', '', regex=False)    # usuwa nowe linie
-        .str.upper()                           # (opcjonalnie) ujednolica wielkość liter
-    )
-
     return df
 
+df1 = normalizuj_minimalnie(df1)
+df2 = normalizuj_minimalnie(df2)
 
-df1 = normalizuj(df1)
-df2 = normalizuj(df2)
+# === 3. ETAP 1 — identyczne rekordy 1:1 ===
+mask = (
+    (df1['NIP'].isin(df2['NIP'])) &
+    (df1['Netto'].isin(df2['Netto'])) &
+    (df1['Brutto'].isin(df2['Brutto'])) &
+    (df1['VAT'].isin(df2['VAT'])) &
+    (df1['Numer dokumentu'].isin(df2['Numer dokumentu']))
+)
 
-duplikaty = pd.merge(df1, df2, on=kolumny_kluczowe, how='inner')
+duplikaty_oczywiste = df1[mask].merge(
+    df2,
+    on=['NIP', 'Netto', 'Brutto', 'VAT', 'Numer dokumentu'],
+    how='inner',
+    suffixes=('_plik1', '_plik2')
+)
 
-# === 6. Zapis do Excela ===
-if not duplikaty.empty:
-    duplikaty.to_excel(plik_wynikowy, index=False)
-    print(f"✅ Zapisano {len(duplikaty)} duplikatów do pliku: {plik_wynikowy}")
+# Usuń te rekordy z dalszego porównywania
+if not duplikaty_oczywiste.empty:
+    print(f"✅ Znaleziono {len(duplikaty_oczywiste)} oczywistych duplikatów 1:1.")
+    df1 = df1[~mask]
+    # Usuń z df2 również rekordy, które już wystąpiły
+    df2 = df2[~df2['Numer dokumentu'].isin(duplikaty_oczywiste['Numer dokumentu'])]
+
 else:
-    print("✅ Brak duplikatów między plikami.")
+    print("ℹ️ Brak oczywistych duplikatów 1:1.")
+
+# === 4. ETAP 2 — nieoczywiste duplikaty (fuzzy matching) ===
+wyniki = []
+
+for i, r1 in df1.iterrows():
+    kandydaci = df2[
+        (df2['NIP'] == r1['NIP']) &
+        (df2['Netto'] == r1['Netto']) &
+        (df2['Brutto'] == r1['Brutto']) &
+        (df2['VAT'] == r1['VAT'])
+    ]
+
+    if kandydaci.empty:
+        continue
+
+    for j, r2 in kandydaci.iterrows():
+        dist = distance.Levenshtein.distance(
+            str(r1['Numer dokumentu']), str(r2['Numer dokumentu'])
+        )
+
+        if 0 < dist <= THRESHOLD_DIST:
+            wyniki.append({
+                "NIP": r1['NIP'],
+                "Numer dokumentu_plik1": r1['Numer dokumentu'],
+                "Numer dokumentu_plik2": r2['Numer dokumentu'],
+                "różnica_znaków": dist,
+                "Netto": r1['Netto'],
+                "Brutto": r1['Brutto'],
+                "VAT": r1['VAT']
+            })
+
+duplikaty_nieoczywiste = pd.DataFrame(wyniki)
+
+# === 5. Usuwanie symetrycznych duplikatów (A-B == B-A) ===
+if not duplikaty_nieoczywiste.empty:
+    duplikaty_nieoczywiste['para_klucz'] = duplikaty_nieoczywiste.apply(
+        lambda x: tuple(sorted([
+            str(x['Numer dokumentu_plik1']).strip(),
+            str(x['Numer dokumentu_plik2']).strip()
+        ])),
+        axis=1
+    )
+
+    duplikaty_nieoczywiste = duplikaty_nieoczywiste.drop_duplicates(subset=['NIP', 'para_klucz'], keep='first')
+    duplikaty_nieoczywiste = duplikaty_nieoczywiste.drop(columns=['para_klucz'])
+
+# === 6. Zapis do Excela w dwóch arkuszach ===
+with pd.ExcelWriter(plik_wynikowy) as writer:
+    if not duplikaty_oczywiste.empty:
+        duplikaty_oczywiste.to_excel(writer, sheet_name='duplikaty_1_do_1', index=False)
+    if not duplikaty_nieoczywiste.empty:
+        duplikaty_nieoczywiste.to_excel(writer, sheet_name='duplikaty_nieoczywiste', index=False)
+
+print("✅ Wyniki zapisano do pliku:", plik_wynikowy)

@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import time
 #"shumee przelewy problemy.xlsx"
-input_file = "zakup test folder 27.10 great (1).xlsx"
+input_file = "temu sm 10.2025 (1).xlsx"
 
 # wczytanie pliku
 df = pd.read_excel(input_file, dtype=str)
@@ -27,12 +27,11 @@ df["NIP"] = df["NIP"].str.replace(r"\D", "", regex=True)
 dups = df[df.duplicated(subset=["NIP", "Numer dokumentu", "Brutto", "Netto"], keep=False)]
 df_clean = df.drop_duplicates(subset=["NIP", "Numer dokumentu", "Brutto", "Netto"])
 
-
 if dups.empty:
     print("[DUP] Brak duplikatów!")
 else:
     print(f"[DUP] Znaleziono {len(dups)} duplikatów w pliku!")
-    print(dups[["NIP", "Numer dokumentu"]].to_string(index=False))
+    print(dups[["Dokument", "Brutto"]].to_string(index=False))
 
     # folder wyjściowy
     os.makedirs("dup", exist_ok=True)
