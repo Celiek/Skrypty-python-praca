@@ -1,8 +1,9 @@
 import pandas as pd
 import os
 import time
-#"shumee przelewy problemy.xlsx"
-input_file = "temu sm 10.2025 (1).xlsx"
+from rapidfuzz import distance
+
+input_file = r"zrzut optima great 01.08-13.11.xlsx"
 
 # wczytanie pliku
 df = pd.read_excel(input_file, dtype=str)
@@ -31,7 +32,7 @@ if dups.empty:
     print("[DUP] Brak duplikatów!")
 else:
     print(f"[DUP] Znaleziono {len(dups)} duplikatów w pliku!")
-    print(dups[["Dokument", "Brutto"]].to_string(index=False))
+    print(dups[["Numer dokumentu", "Brutto"]].to_string(index=False))
 
     # folder wyjściowy
     os.makedirs("dup", exist_ok=True)
