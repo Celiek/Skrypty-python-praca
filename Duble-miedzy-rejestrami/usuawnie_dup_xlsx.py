@@ -19,15 +19,11 @@ NS = {"c": "http://www.comarch.pl/cdn/optima/offline"}
 # FUNKCJE POMOCNICZE
 # ========================================
 def norm(s: str | None) -> str:
-    """Normalizuje string, usuwa whitespace, CDATA i różne kreski"""
     if not s:
         return ""
     s = re.sub(r"<!\[CDATA\[|\]\]>", "", str(s))
-    s = s.strip()
-    s = s.replace("\u00A0", "")
-    s = s.replace("–", "-").replace("—", "-").replace("−", "-")
-    s = re.sub(r"\s+", "", s)
-    return s
+    s = s.strip().replace("\u00A0", "")
+    return re.sub(r"\s+", "", s)
 
 
 def ensure_text(elem, value: str):
@@ -46,6 +42,11 @@ def find_or_create(parent, tag_name: str, ns=NS):
 # 1) Wczytanie excela
 # ========================================
 df = pd.read_excel(XLSX_PATH)
+
+print("\n=== PODGLĄD PLIKU EXCEL ===")
+print(df.head(10))              # podgląd pierwszych wierszy
+print("Kolumny:", df.columns.tolist())  # nazwy kolumn
+
 df[KOL_NETTO] = pd.to_numeric(df[KOL_NETTO], errors="coerce").fillna(0)
 df[KOL_VAT]   = pd.to_numeric(df[KOL_VAT],   errors="coerce").fillna(0)
 
@@ -63,11 +64,18 @@ print(f"📘 Wczytano {len(mapa_kwot)} rekordów z Excela.")
 tree = ET.parse(XML_IN)
 root = tree.getroot()
 
+print("\n=== PIERWSZE NUMERY W XML ===")
+for i, rej in enumerate(root.findall(".//c:REJESTR_SPRZEDAZY_VAT", NS)[:20]):
+    num_xml = rej.find("c:NUMER", NS)
+    if num_xml is not None:
+        print(i, repr(norm(num_xml.text)))
+
 aktualizacje = 0
 brak = 0
 
+
 # ========================================
-# 3) Aktualizacja kwot + PŁATNOŚCI
+# 3) Aktualizacja kwot + płatności
 # ========================================
 for rej in root.findall(".//c:REJESTR_SPRZEDAZY_VAT", NS):
 
@@ -75,98 +83,94 @@ for rej in root.findall(".//c:REJESTR_SPRZEDAZY_VAT", NS):
     num_elem = rej.find("c:NUMER", NS)
     if num_elem is None or not num_elem.text:
         continue
-
     numer = norm(num_elem.text)
 
-    # pobranie waluty dokumentu
+    # waluta dokumentu
     waluta_elem = rej.find("c:WALUTA", NS)
     waluta_dok = waluta_elem.text.strip() if waluta_elem is not None and waluta_elem.text else "PLN"
-    waluta_dok = waluta_dok if waluta_dok != "" else "PLN"
     ensure_text(waluta_elem, waluta_dok)
 
-    # płatność
+    # przygotowanie płatności
     plat = rej.find("c:PLATNOSCI/c:PLATNOSC", NS)
     if plat is not None:
-        w_plat = find_or_create(plat, "WALUTA_PLAT")
-        ensure_text(w_plat, waluta_dok)
+        ensure_text(find_or_create(plat, "WALUTA_PLAT"), waluta_dok)
+        ensure_text(find_or_create(plat, "WALUTA_DOK"), waluta_dok)
 
-        w_dok = find_or_create(plat, "WALUTA_DOK")
-        ensure_text(w_dok, waluta_dok)
-
-    # aktualizacja kwot
-    if numer in mapa_kwot:
-        netto_val, vat_val = mapa_kwot[numer]
-        brutto_val = netto_val + vat_val
-
-        # aktualizacja kwot w pozycjach
-        for poz in rej.findall(".//c:POZYCJE/c:POZYCJA", NS):
-            el_netto = poz.find("c:NETTO", NS)
-            el_vat   = poz.find("c:VAT",   NS)
-
-            if el_netto is not None:
-                el_netto.text = f"{netto_val:.2f}".replace(".", ",")
-            if el_vat is not None:
-                el_vat.text = f"{vat_val:.2f}".replace(".", ",")
-
-        # === POPRAWIANIE PŁATNOŚCI ===
-        if plat is not None:
-
-            # KWOTA_PLAT = BRUTTO
-            kw_plat = find_or_create(plat, "KWOTA_PLAT")
-            kw_plat.text = f"{brutto_val:.2f}".replace(".", ",")
-
-            # kurs dla PLN
-            kurs_elem = rej.find("c:NOTOWANIE_WALUTY_ILE", NS)
-            if kurs_elem is not None and kurs_elem.text:
-                try:
-                    rate = float(kurs_elem.text.replace(",", "."))
-                    brutto_pln = brutto_val * rate
-                except:
-                    brutto_pln = 0
-            else:
-                brutto_pln = 0
-
-            # KWOTA_PLN_PLAT
-            kw_pln_plat = find_or_create(plat, "KWOTA_PLN_PLAT")
-            kw_pln_plat.text = f"{brutto_pln:.2f}".replace(".", ",")
-
-        aktualizacje += 1
-    else:
+    # kwoty z excela
+    if numer not in mapa_kwot:
         brak += 1
+        continue
+
+    netto_excel, vat_excel = mapa_kwot[numer]
+    brutto_excel = netto_excel + vat_excel
+
+    # ===== ROZKŁAD POZYCJI =====
+    pozycje = rej.findall(".//c:POZYCJE/c:POZYCJA", NS)
+
+    if len(pozycje) > 0:
+        # 1) Pierwsza pozycja => pełne wartości z Excela
+        poz1 = pozycje[0]
+
+        el_netto_1 = find_or_create(poz1, "NETTO")
+        el_vat_1   = find_or_create(poz1, "VAT")
+
+        el_netto_1.text = f"{netto_excel:.2f}".replace(".", ",")
+        el_vat_1.text   = f"{vat_excel:.2f}".replace(".", ",")
+
+        # NETTO_SYS = NETTO × kurs
+        kurs_elem = rej.find("c:NOTOWANIE_WALUTY_ILE", NS)
+        if kurs_elem is not None and kurs_elem.text:
+            rate = float(kurs_elem.text.replace(",", "."))
+        else:
+            rate = 1.0  # fallback
+
+        netto_sys = netto_excel * rate
+        vat_sys = vat_excel * rate
+
+        # ustaw sys-value
+        ensure_text(find_or_create(poz1, "NETTO_SYS"),  f"{netto_sys:.2f}".replace(".", ","))
+        ensure_text(find_or_create(poz1, "VAT_SYS"),    f"{vat_sys:.2f}".replace(".", ","))
+        ensure_text(find_or_create(poz1, "NETTO_SYS2"), f"{netto_sys:.2f}".replace(".", ","))
+        ensure_text(find_or_create(poz1, "VAT_SYS2"),   f"{vat_sys:.2f}".replace(".", ","))
+
+        # 2) Pozostałe pozycje wyzerować
+        for poz in pozycje[1:]:
+            for tag in ["NETTO", "VAT", "NETTO_SYS", "VAT_SYS", "NETTO_SYS2", "VAT_SYS2"]:
+                ensure_text(find_or_create(poz, tag), "0,00")
+
+    # ===== PŁATNOŚCI =====
+    if plat is not None:
+        kw_plat = find_or_create(plat, "KWOTA_PLAT")
+        kw_plat.text = f"{brutto_excel:.2f}".replace(".", ",")
+
+        kw_pln = find_or_create(plat, "KWOTA_PLN_PLAT")
+        kw_pln.text = f"{(brutto_excel * rate):.2f}".replace(".", ",")
+
+    aktualizacje += 1
 
 
-print(f"\n✅ Zaktualizowano: {aktualizacje}")
+print(f"✅ Zaktualizowano: {aktualizacje}")
 print(f"⚠️ Brak dopasowania: {brak}")
+
 
 # ========================================
 # 4) Usuwanie duplikatów po ID_ZRODLA
 # ========================================
 print("\n🧹 Usuwanie duplikatów po ID_ZRODLA...")
 
-rejestry_parent = root.find(".//c:REJESTRY_SPRZEDAZY_VAT", NS)
-if rejestry_parent is None:
-    print("❌ Nie znaleziono REJESTRY_SPRZEDAZY_VAT")
-else:
-    seen_ids = set()
-    to_remove = []
-
-    for rej in rejestry_parent.findall("c:REJESTR_SPRZEDAZY_VAT", NS):
-        id_elem = rej.find("c:ID_ZRODLA", NS)
-        if id_elem is None or not id_elem.text:
+parent = root.find(".//c:REJESTRY_SPRZEDAZY_VAT", NS)
+if parent is not None:
+    seen = set()
+    for rej in list(parent.findall("c:REJESTR_SPRZEDAZY_VAT", NS)):
+        id_el = rej.find("c:ID_ZRODLA", NS)
+        if not id_el or not id_el.text:
             continue
+        key = norm(id_el.text)
 
-        id_text = norm(id_elem.text)
-        if id_text in seen_ids:
-            to_remove.append(rej)
+        if key in seen:
+            parent.remove(rej)
         else:
-            seen_ids.add(id_text)
-
-    for rej in to_remove:
-        rejestry_parent.remove(rej)
-
-    print(f"🗑️ Usunięto: {len(to_remove)}")
-    print(f"📊 Pozostało: {len(seen_ids)} unikalnych")
-
+            seen.add(key)
 
 # ========================================
 # 5) Zapis bez ns0:

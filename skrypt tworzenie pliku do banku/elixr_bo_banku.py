@@ -1521,9 +1521,112 @@ def _group_key(row) -> str:
 # Normalizacja dat do wysyłki przelewów
 #######################################
 
+import sys
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+import io
+import re
+from datetime import datetime
+
+
+def load_holidays_or_exit() -> set:
+    """
+    Pobiera święta z NBP.
+    Jeśli scrapowanie się nie powiedzie → KOŃCZY PROGRAM z komunikatem.
+    Zwraca: set() dat typu datetime.date
+    """
+    URL = "https://nbp.pl/o-nbp/dni-wolne/"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    }
+
+    try:
+        r = requests.get(URL, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        print("❌ BŁĄD: Nie można połączyć się z NBP!")
+        print("🔌 Sprawdź internet lub dostęp do https://nbp.pl/o-nbp/dni-wolne/")
+        print(f"🔍 Szczegóły: {e}")
+        sys.exit(1)
+
+    # Scrap HTML
+    try:
+        soup = BeautifulSoup(r.text, "lxml")
+        table = soup.select_one("table.table")
+
+        if table is None:
+            raise RuntimeError("Brak tabeli świąt w HTML")
+
+        df = pd.read_html(io.StringIO(str(table)))[0]
+    except Exception as e:
+        print("❌ BŁĄD: Nie udało się odczytać tabeli świąt ze strony NBP!")
+        print("🔍 Struktura strony mogła się zmienić.")
+        print(f"📄 Szczegóły: {e}")
+        sys.exit(1)
+
+    # Konwersja świąt → set(datetime.date)
+    holidays = set()
+    year = datetime.now().year
+
+    for _, row in df.iterrows():
+        val = str(row.iloc[1])
+        m = re.match(r"(\d{1,2})\s+(\w+)", val)
+        if not m:
+            continue
+
+        day, month_name = m.groups()
+
+        months = {
+            'stycznia': 1, 'lutego': 2, 'marca': 3, 'kwietnia': 4,
+            'maja': 5, 'czerwca': 6, 'lipca': 7, 'sierpnia': 8,
+            'września': 9, 'października': 10, 'listopada': 11, 'grudnia': 12
+        }
+
+        if month_name.lower() not in months:
+            continue
+
+        holidays.add(datetime(year, months[month_name.lower()], int(day)).date())
+
+    print(f"✅ Załadowano {len(holidays)} świąt z NBP.")
+    return holidays
+
+
+def get_previous_workday(date: datetime) -> datetime.date:
+    prev = (date - timedelta(days=1)).date()
+
+    HOLIDAYS = load_holidays_or_exit()
+
+    while prev.weekday() >= 5 or prev in HOLIDAYS:
+        prev -= timedelta(days=1)
+
+    return prev
+
+
 def _safe_add30(s_min: str | None, s_max: str | None) -> str:
-    base = s_max or s_min
-    return add_days_to_date_str(base, 30) if base else datetime.now().strftime("%Y%m%d")
+    today = datetime.now().date()
+    base_str = s_max or s_min
+
+    if not base_str:
+        return today.strftime("%Y%m%d")
+
+    try:
+        base_date = datetime.strptime(base_str, "%Y%m%d").date()
+    except ValueError:
+        raise ValueError(f"Nieprawidłowa data: {base_str}")
+
+    if base_date == today:
+        return today.strftime("%Y%m%d")
+
+    target = base_date + timedelta(days=30)
+    HOLIDAYS = load_holidays_or_exit()
+
+    if target.weekday() >= 5 or target in HOLIDAYS:
+        target = get_previous_workday(datetime.combine(target, datetime.min.time()))
+
+    return target.strftime("%Y%m%d")
+
 
 
 def gr_to_pln_comma(v_gr: int) -> str:
@@ -1630,6 +1733,10 @@ def przetworz_plik_xlsx(
     # --- wyszukiwanie zakazanych kontrahentów ---
     forbidden_name_list = COMPANIES[key]["forbidden_name"]
     forbidden_nip_list = COMPANIES[key]["forbidden_nip"]
+
+    # Sprawdzenie czy da się pobrać dni wolne od pracy ze strony głównej NBP
+    HOLIDAYS = load_holidays_or_exit()
+
 
     mask = df["Kontrahent"].isin(forbidden_name_list)
     maska_nip = df["NIP"].isin(forbidden_nip_list)
