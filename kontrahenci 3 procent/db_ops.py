@@ -7,6 +7,8 @@ import pandas as pd
 import requests
 import unicodedata
 from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
+from sqlalchemy.dialects.postgresql import psycopg2
 
 from utils import db_conn
 
@@ -55,55 +57,116 @@ def get_addresses_from_db() -> dict[str, str]:
 
 def insert_new_invoices_from_xlsx(xlsx_path: str, company: str):
     """
-    Wstawia do tabeli 'faktury' rekordy z XLSX, których numer_faktury nie istnieje w bazie.
+    Wstawia do tabeli 'faktury_do_prowizji' rekordy z XLSX, których numer_faktury nie istnieje w bazie.
     Wymagane kolumny: Numer dokumentu, Data wystawienia, Netto, VAT, Brutto.
     """
-    df = pd.read_excel(xlsx_path)
+    df_to_db = pd.read_excel(xlsx_path)
+    spolka =company
 
-    # standaryzacja nazw kolumn
-    df.columns = [c.strip() for c in df.columns]
-    required_cols = {"Numer dokumentu", "Data wystawienia", "Netto", "VAT", "Brutto"}
-    missing = required_cols - set(df.columns)
+    if df_to_db.empty:
+        logging.info("[DB] Brak danych do zapisania.")
+        return
+
+    df_to_db = df_to_db.copy()
+
+    # --- 1. Walidacja kolumn (ZANIM dotkniemy NIP) ---
+    required = {
+        "Numer dokumentu", "Data wystawienia",
+        "Netto", "VAT", "Brutto",
+        "NIP",
+        "__netto_gr", "__vat_gr", "__brutto_gr"
+    }
+    missing = required - set(df_to_db.columns)
     if missing:
-        raise ValueError(f"Brakuje kolumn: {', '.join(missing)} w pliku {xlsx_path}")
+        raise ValueError(f"[DB] Brakuje kolumn: {', '.join(sorted(missing))}")
 
-    inserted, skipped = 0, 0
+    # --- 2. Normalizacja NIP ---
+    df_to_db["__nip_clean"] = df_to_db["NIP"].astype(str).str.replace(r"\D", "", regex=True)
 
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            for _, row in df.iterrows():
-                numer = str(row["Numer dokumentu"]).strip()
-                if not numer:
-                    continue
+    # --- 3. Połączenie ---
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-                # sprawdzenie duplikatu
-                cur.execute("SELECT 1 FROM faktury_do_prowizji WHERE numer_faktury = %s", (numer,))
-                if cur.fetchone():
-                    skipped += 1
-                    continue
+        # Pobierz obecne rekordy z bazy, aby szybko sprawdzać duplikaty
+        cur.execute("""
+                SELECT nip, numer_faktury, nazwa_spolki,
+                       kwota_netto, kwota_vat, kwota_brutto
+                FROM faktury_prowizje
+            """)
 
-                try:
-                    kw_netto = Decimal(str(row["Netto"]).replace(",", "."))
-                    kw_vat = Decimal(str(row["VAT"]).replace(",", "."))
-                    kw_brutto = Decimal(str(row["Brutto"]).replace(",", "."))
-                except Exception:
-                    logging.warning(f"[DB] Błąd parsowania kwot w fakturze {numer}")
-                    continue
+        existing = {
+            (row["nip"], row["numer_faktury"], row["nazwa_spolki"]):
+                (float(row["kwota_netto"]), float(row["kwota_vat"]), float(row["kwota_brutto"]))
+            for row in cur.fetchall()
+        }
 
-                data_wyst = pd.to_datetime(row["Data wystawienia"], errors="coerce").date()
+        inserted = 0
+        skipped = 0
 
+        # --- 4. Iteracja przez rekordy ---
+        for _, row in df_to_db.iterrows():
+
+            numer = str(row["Numer dokumentu"]).strip()
+            nip = row["__nip_clean"]
+
+            if not numer or not nip:
+                skipped += 1
+                continue
+
+            key = (nip, numer, spolka)
+
+            kw_netto = float(Decimal(row["__netto_gr"]) / 100)
+            kw_vat = float(Decimal(row["__vat_gr"]) / 100)
+            kw_brutto = float(Decimal(row["__brutto_gr"]) / 100)
+
+            # --- 4A. Duplikat już istnieje ---
+            if key in existing:
+                old_netto, old_vat, old_brutto = existing[key]
+
+                # Konflikt kwot
+                if (old_netto, old_vat, old_brutto) != (kw_netto, kw_vat, kw_brutto):
+                    logging.error(
+                        f"[DB] KONFLIKT KWOT: FV {numer} NIP={nip} SP={spolka}  "
+                        f"w bazie: {old_netto}/{old_vat}/{old_brutto}, "
+                        f"w pliku: {kw_netto}/{kw_vat}/{kw_brutto}"
+                    )
+
+                skipped += 1
+                continue
+
+            # --- 4B. Próba INSERT ---
+            try:
                 cur.execute("""
-                    INSERT INTO faktury_do_prowizji (numer_faktury, data_wystawienia,
-                                         kwota_netto, kwota_vat, kwota_brutto,
-                                         typ_faktury, nazwa_spolki)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (numer_faktury) DO NOTHING;
-                """, (numer, data_wyst, kw_netto, kw_vat, kw_brutto, "POJEDYNCZA", company))
+                        INSERT INTO faktury_prowizje (
+                            numer_faktury, data_wystawienia,
+                            kwota_netto, kwota_vat, kwota_brutto,
+                            nip, kontrahent, nazwa_spolki
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (nip, numer_faktury, nazwa_spolki) DO NOTHING
+                    """, (
+                    numer,
+                    pd.to_datetime(row["Data wystawienia"], errors="coerce").date(),
+                    kw_netto, kw_vat, kw_brutto,
+                    nip,
+                    row.get("Kontrahent", ""),
+                    spolka
+                ))
+
+                # Dodajemy do pamięci — żeby kolejne wiersze nie wstawiały duplikatów
+                existing[key] = (kw_netto, kw_vat, kw_brutto)
                 inserted += 1
+
+            except psycopg2.Error as e:
+                logging.error(f"[DB] Błąd INSERT FV={numer} NIP={nip}: {e.pgerror}")
+                conn.rollback()
+                skipped += 1
+                continue
 
         conn.commit()
 
-    logging.info(f"[DB] ✅ Zapisano {inserted} nowych faktur, pominięto {skipped} duplikatów.")
+        logging.info(
+            f"[DB] Wynik zapisu: {inserted} dodanych, {skipped} pominiętych."
+        )
 
 
 def zapisz_powiazania_do_bazy(df, wyniki, company):
@@ -199,18 +262,12 @@ def zapisz_powiazania_do_bazy(df, wyniki, company):
 FAKTUROWNIA_API = os.getenv("FAKTUROWNIA_API", "https://shumee.fakturownia.pl")
 FAKTUROWNIA_TOKEN = os.getenv("FAKTUROWNIA_TOKEN")
 
-
-import re
-
-
 ### DO SPRAWDZENIA
 def get_names_from_db_for_nips(nips: list[str | int]) -> dict[str, str]:
     """
     Zwraca mapę {NIP: nazwa} dla podanych NIP-ów z tabeli `merchanci` (nip BIGINT).
     Czyści nazwę z '|', różnych rodzajów myślników, i nadmiarowych spacji / znaków nowej linii.
     """
-    from utils import db_conn
-    import logging
 
     nips_bigint: list[int] = []
     for x in nips:
@@ -287,8 +344,6 @@ def zapisz_faktury_prowizje(wyniki, company):
     import logging
     from datetime import date
 
-    # logging.debug(f"[DEBUG] Dane wejściowe do zapisz_faktury_prowizje: {wyniki}")
-
     zapisane, duplikaty = 0, 0
 
     with db_conn() as conn:
@@ -340,8 +395,6 @@ def zapisz_powiazania(df, wyniki):
     Tworzy powiązania między fakturami źródłowymi (tabela faktury)
     a wystawionymi fakturami prowizyjnymi (tabela faktury_prowizje).
     """
-    import logging
-    from utils import db_conn
 
     dodane, pominiete = 0, 0
 

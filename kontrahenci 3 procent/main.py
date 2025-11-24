@@ -2,6 +2,7 @@ import logging
 import os
 from argparse import ArgumentParser
 from datetime import date, datetime
+
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -13,10 +14,9 @@ from db_ops import (
     sprawdz_powielone_faktury,
     get_names_from_db_for_nips,
 )
-from fakturownia_api import get_faktur, dodaj_faktury
+from fakturownia_api import dodaj_faktury
 from reports import export_grouped_excels
 from utils import clean_nip, db_conn, clean_df
-
 
 # ===== logging =====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -33,7 +33,7 @@ DEPARTMENT_ID = {
     "extrastore": 1705460,
 }
 
-SPECIAL_2PROC = {"6020134043"}  # NIP-y na 2%
+SPECIAL_2PROC = {"6020134043"}  # NIP-y fakturowane na 2%
 
 
 def parse_issue_date(arg_val: str | None) -> date:
@@ -56,11 +56,11 @@ def build_items_from_merchants_and_invoices(df_faktury, df_merch, adresy_z_bazy)
     df_faktury = df_faktury.copy()
     df_merch = df_merch.copy()
 
-    # ✅ FIX: prawidłowe parsowanie Data wystawienia
+    # Prawidłowe parsowanie Data wystawienia
     df_faktury["Data wystawienia"] = parse_date_series(df_faktury["Data wystawienia"])
     df_faktury["NIP"] = df_faktury["NIP"].astype(str).apply(clean_nip)
 
-    # ✅ FIX: prawidłowe parsowanie daty w filtrze
+    # Prawidłowe parsowanie daty w filtrze
     if "Od kiedy prowizja 3%" in df_merch.columns:
         df_merch["Od kiedy prowizja 3%"] = parse_date_series(df_merch["Od kiedy prowizja 3%"])
     else:

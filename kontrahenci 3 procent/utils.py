@@ -1,12 +1,12 @@
+import logging
 import os
+import re
 
 import pandas as pd
 import psycopg2
 import unicodedata
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
-import re
-import logging
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

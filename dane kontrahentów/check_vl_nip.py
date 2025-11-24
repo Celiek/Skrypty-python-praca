@@ -10,13 +10,14 @@ from dotenv import load_dotenv
 from typing import List, Dict
 from psycopg2.extras import RealDictCursor
 import re
+import sys
 
 # ====================
 # Zmienne do programu
 # ====================
 
 data = datetime.today().strftime("%Y%m%d")
-link_plik_płaski = "https://plikplaski.mf.gov.pl/pliki//" + data + ".7z"
+link_plik_płaski = "https://plikplaski.mf.gov.pl/pliki/" + data + ".7z"
 path_to_zip_file = "/"
 
 load_dotenv()
@@ -160,7 +161,7 @@ def sprawdz_kontrahentow(json_file: str):
         hash_value = Sha512Hash1(nip_clean, konto_clean, data=gen_date, iters=iters)
         if hash_value in czynni or hash_value in zwolnieni:
             znalezione.append((nip_clean, konto_clean))
-            print(f"[✔] Znaleziono pełne: NIP={nip_clean}, Konto={konto_clean}")
+            print(f"[V] Znaleziono pełne: NIP={nip_clean}, Konto={konto_clean}")
             continue
 
         # 2) maski
@@ -171,7 +172,7 @@ def sprawdz_kontrahentow(json_file: str):
             hash_value = Sha512Hash1(nip_clean, masked_account, data=gen_date, iters=iters)
             if hash_value in czynni or hash_value in zwolnieni:
                 znalezione.append((nip_clean, konto_clean))
-                print(f"[✔] Znaleziono z maską {maska}: NIP={nip_clean}, Konto={konto_clean}")
+                print(f"[V] Znaleziono z maską {maska}: NIP={nip_clean}, Konto={konto_clean}")
                 znaleziono = True
                 break
 
@@ -181,18 +182,29 @@ def sprawdz_kontrahentow(json_file: str):
         # 3) fallback: tylko NIP
         hash_value = Sha512HashNIP(nip_clean, data=gen_date, iters=iters)
         if hash_value in czynni or hash_value in zwolnieni:
-            print(f"[✔] Znaleziono po samym NIP: {nip_clean} (bez konta)")
+            print(f"V] Znaleziono po samym NIP: {nip_clean} (bez konta)")
         else:
-            print(f"[✘] Brak: NIP={nip_clean}, Konto={konto_clean}")
+            print(f"[X] Brak: NIP={nip_clean}, Konto={konto_clean}")
 
-    print(f"\n[✓] Łącznie znalezionych: {len(znalezione)}")
+    print(f"\n[V] Łącznie znalezionych: {len(znalezione)}")
     return znalezione
 
 def main():
-    get_file(link_plik_płaski)
-    unzip()
-    json_file = str(data) + ".json"
-    sprawdz_kontrahentow(json_file)
+    # === przekierowanie stdout do pliku tekstowego ===
+    log_filename = f"wynik_{data}.txt"
+    with open(log_filename, "w", encoding="utf-8") as f:
+        sys.stdout = f
+        print(f"[START] Uruchomiono program: {datetime.now()}")
+        print("=" * 80)
+
+        get_file(link_plik_płaski)
+        unzip()
+        json_file = str(data) + ".json"
+        sprawdz_kontrahentow(json_file)
+
+        print("=" * 80)
+        print(f"[KONIEC] Zakończono działanie: {datetime.now()}")
+
 
 if __name__ == "__main__":
     main()

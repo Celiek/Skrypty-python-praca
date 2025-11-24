@@ -3,7 +3,6 @@ import logging
 import math
 import os
 import random
-import re
 import shutil
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
@@ -13,12 +12,9 @@ from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, List
-from bs4 import BeautifulSoup
 
-import pandas as pd
 import psycopg2
 import py7zr
-import requests
 import unicodedata
 from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor, execute_values
@@ -26,6 +22,14 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+
+import sys
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+import io
+import re
+from datetime import datetime
 
 import json
 
@@ -121,6 +125,7 @@ OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
 # =========================
 # Normalizacja / kodowanie
 # =========================
+
 
 def _yyyymmdd_to_iso(d) -> str:
     """
@@ -503,7 +508,6 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     return s
 
 from pathlib import Path
-from datetime import datetime
 import pandas as pd
 
 def export_grouped_excels(df: pd.DataFrame, out_dir: str, nazwa_spolki: str) -> dict[str, str]:
@@ -743,7 +747,31 @@ def is_blank(s: str | None) -> bool:
 # DB helpers
 # =========================
 
-# DOkończyć
+def get_paid_invoice_keys() -> set[tuple[str, str]]:
+    """
+    Zwraca zbiór kluczy (nip_clean, numer_faktury_norm),
+    czyli faktur, które JUŻ są w bazie (tabela faktury).
+    """
+    sql = """
+        SELECT m.nip, f.numer_faktury
+        FROM faktury f
+        JOIN merchanci m ON m.id = f.id_kontrahenta
+    """
+    keys: set[tuple[str, str]] = set()
+
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql)
+            for row in cur.fetchall():
+                nip_clean = nip_digits(row["nip"])
+                if len(nip_clean) != 10:
+                    # ignorujemy dziwne NIP-y
+                    continue
+                doc_norm = _norm_doc_no(row["numer_faktury"])
+                keys.add((nip_clean, doc_norm))
+
+    logging.info("[DB] Wczytano %d opłaconych faktur z bazy.", len(keys))
+    return keys
 
 def nipy_db():
     query = """
@@ -1121,40 +1149,50 @@ def sprawdz_excelowe_kontrahenty(json_file: str, excel_file: str):
     return brakujace
 
 #dodać zapis nazwy spolki do bazy danych
-def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame,spolka: str):
+def zapisz_faktury_do_bazy(df_to_db: pd.DataFrame, spolka: str) -> None:
     """
-    Zapisuje faktury do bazy danych (przed zapisem
-    sprawdza czy nie ma w nich powtórek  albo złych wartości),
-    zapisane faktury mają oznaczenie z jakiej spółki są opłacane
+    Zapisuje faktury do tabeli 'faktury'.
+    Zakładamy, że df_to_db ma kolumny:
+      - 'Numer dokumentu'
+      - 'Data wystawienia'
+      - 'Netto', 'VAT', 'Brutto'
+      - 'NIP'
+      - '__netto_gr', '__vat_gr', '__brutto_gr' (grosze)
     """
 
+    required = {
+        "Numer dokumentu", "Data wystawienia",
+        "Netto", "VAT", "Brutto",
+        "__netto_gr", "__vat_gr", "__brutto_gr",
+        "__nip_clean",
+    }
 
     if df_to_db.empty:
-        logging.info("[DB] Brak danych do zapisania w bazie.")
+        logging.info("[DB] Brak danych do zapisania.")
         return
 
     df_to_db = df_to_db.copy()
 
-    # --- Kolumna z czystym NIP-em ---
-    if "__nip_two" in df_to_db.columns:
-        df_to_db.loc[:, "__nip_clean"] = (
-            df_to_db["__nip_two"].astype(str).str.replace(r"\D", "", regex=True)
-        )
-    else:
-        raise ValueError("Brak kolumny __nip_two w DataFrame – nie można przypisać kontrahenta.")
+    # czysty NIP
+    df_to_db["__nip_clean"] = df_to_db["NIP"].astype(str).str.replace(r"\D", "", regex=True)
 
-    # --- Połączenie z bazą ---
+
+    missing = required - set(df_to_db.columns)
+    if missing:
+        raise ValueError(f"[DB] Brakuje kolumn w df_to_db: {', '.join(sorted(missing))}")
+
+    print("[DEBUG] nazwy kolumn:")
+    print(df_to_db.columns)
+
     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-        # pobierz aktualne rekordy (unikalne kombinacje)
+        # wczytujemy istniejące rekordy -> (id_kontrahenta, numer_faktury)
         cur.execute("""
-               SELECT id_kontrahenta, numer_faktury, kwota_netto, kwota_vat, kwota_brutto, nazwa_spolki
-               FROM faktury
-           """)
+            SELECT id_kontrahenta, numer_faktury
+            FROM faktury
+        """)
         existing = {
-            (str(row["id_kontrahenta"]), str(row["numer_faktury"]).strip(),
-             float(row["kwota_netto"]), float(row["kwota_vat"]), float(row["kwota_brutto"]),
-             row.get("nazwa_spolki"))
+            (row["id_kontrahenta"], row["numer_faktury"].strip())
             for row in cur.fetchall()
         }
 
@@ -1163,50 +1201,83 @@ def zapisz_faktury_do_bazy( df_to_db:pd.DataFrame,spolka: str):
 
         for _, row in df_to_db.iterrows():
             numer_faktury = str(row["Numer dokumentu"]).strip()
-            data_wystawienia = pd.to_datetime(row["Data wystawienia"], dayfirst=True, errors="coerce").date()
-            kw_netto = round(Decimal(row["__netto_gr"]) / 100, 2)
-            kw_vat = round(Decimal(row["__vat_gr"]) / 100, 2)
-            kw_brutto = round(Decimal(row["__brutto_gr"]) / 100, 2)
-            typ_faktury = "POJEDYNCZA"
 
-            # znajdź kontrahenta po NIP
+            # data wystawienia
+            data_wystawienia = pd.to_datetime(
+                row["Data wystawienia"],
+                dayfirst=True,
+                errors="coerce"
+            )
+            if pd.isna(data_wystawienia):
+                skipped += 1
+                logging.warning(
+                    f"[DB] Zła data wystawienia dla FV {numer_faktury} → pomijam"
+                )
+                continue
+            data_wystawienia = data_wystawienia.date()
+
+            # kwoty (df ma grosze, my zapisujemy zł)
+            kw_netto  = (Decimal(row["__netto_gr"])  / 100).quantize(Decimal("0.01"))
+            kw_vat    = (Decimal(row["__vat_gr"])    / 100).quantize(Decimal("0.01"))
+            kw_brutto = (Decimal(row["__brutto_gr"]) / 100).quantize(Decimal("0.01"))
+
             nip = row["__nip_clean"]
-            cur.execute("SELECT id FROM merchanci WHERE nip = %s", (nip,))
+            if len(nip) != 10 or not nip.isdigit():
+                skipped += 1
+                logging.warning(f"[DB] Zły NIP ({nip}) → pomijam FV {numer_faktury}")
+                continue
+
+            # Pobierz kontrahenta
+            cur.execute("SELECT id FROM merchanci WHERE nip = %s", (int(nip),))
             kontrahent = cur.fetchone()
             if not kontrahent:
                 skipped += 1
-                logging.warning(f"[DB] Pominięto fakturę {numer_faktury} (NIP={nip}) – brak kontrahenta w merchanci.")
+                logging.warning(f"[DB] Brak kontrahenta NIP={nip} → pomijam FV {numer_faktury}")
                 continue
 
             id_kontrahenta = kontrahent["id"]
 
-            # sprawdź, czy duplikat już istnieje w bazie (łącznie z nazwą spółki)
-            key = (str(id_kontrahenta), numer_faktury, float(kw_netto),
-                   float(kw_vat), float(kw_brutto), spolka)
+            # Duplikat?
+            key = (id_kontrahenta, numer_faktury)
             if key in existing:
                 skipped += 1
-                logging.info(f"[DB] Pominięto duplikat: {numer_faktury} (NIP={nip}, spółka={spolka})")
+                logging.info(f"[DB] Pominięto duplikat: FV {numer_faktury} (NIP={nip})")
                 continue
 
-            # jeśli nie istnieje → dodaj
-            cur.execute("""
-                INSERT INTO faktury (
+            # INSERT
+            try:
+                cur.execute("""
+                    INSERT INTO faktury (
+                        numer_faktury, data_wystawienia,
+                        kwota_netto, kwota_vat, kwota_brutto,
+                        typ_faktury, id_kontrahenta, nazwa_spolki
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id_kontrahenta, numer_faktury) DO NOTHING
+                """, (
                     numer_faktury, data_wystawienia,
-                    kwota_netto, kwota_vat, kwota_brutto,
-                    typ_faktury, id_kontrahenta, nazwa_spolki
+                    kw_netto, kw_vat, kw_brutto,
+                    "POJEDYNCZA", id_kontrahenta, spolka
+                ))
+
+                # jeżeli DB nie wywaliła błędu – traktujemy jako zapisane / zignorowane przez ON CONFLICT
+                existing.add(key)
+                inserted += 1
+
+            except psycopg2.Error as e:
+                skipped += 1
+                logging.error(
+                    f"[DB] BŁĄD zapisu faktury {numer_faktury} (NIP={nip}): {e.pgerror}"
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (numer_faktury) DO NOTHING
-            """, (
-                numer_faktury, data_wystawienia,
-                kw_netto, kw_vat, kw_brutto,
-                typ_faktury, id_kontrahenta, spolka
-            ))
-            existing.add(key)
-            inserted += 1
+                conn.rollback()        # anuluj ten INSERT, reszta transakcji dalej żyje
+                continue
 
         conn.commit()
-        logging.info(f"[DB] ✅ Zapisano {inserted} nowych faktur, pominięto {skipped} duplikatów.")
+
+        logging.info(
+            f"[DB] Zapisano prób {inserted} INSERT-ów (część mogła zostać zignorowana przez ON CONFLICT), "
+            f"pominięto {skipped} wierszy (braki, błędy lub duplikaty)."
+        )
 
 # ============================================
 # LOSOWE OPÓŹNIENIE
@@ -1461,7 +1532,6 @@ def find_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     d["__vat_gr"]   = _money_to_gr_series(df["VAT"])
     d["__brut_gr"]  = _money_to_gr_series(df["Brutto"])
 
-    mdup = d.duplicated(subset=["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"], keep="first")
     group_sizes = d.groupby(["__doc_no_norm", "__netto_gr", "__vat_gr", "__brut_gr"])["Numer dokumentu"].transform("size")
     d["__is_dup_group"] = group_sizes > 1
     full_dup_groups = d.loc[d["__is_dup_group"]].copy()
@@ -1520,15 +1590,6 @@ def _group_key(row) -> str:
 #######################################
 # Normalizacja dat do wysyłki przelewów
 #######################################
-
-import sys
-import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-import io
-import re
-from datetime import datetime
-
 
 def load_holidays_or_exit() -> set:
     """
@@ -1589,14 +1650,20 @@ def load_holidays_or_exit() -> set:
 
         holidays.add(datetime(year, months[month_name.lower()], int(day)).date())
 
-    print(f"✅ Załadowano {len(holidays)} świąt z NBP.")
+    print(f"[HOLIDAYS] Załadowano {len(holidays)} świąt z NBP.")
     return holidays
+
+# -------------------------------
+# CACHE ŚWIĄT ŁADOWANY TYLKO RAZ
+# -------------------------------
+try:
+    HOLIDAYS = load_holidays_or_exit()
+except SystemExit:
+    raise  # kończy program jeśli nie da się połączyć z NBP
 
 
 def get_previous_workday(date: datetime) -> datetime.date:
     prev = (date - timedelta(days=1)).date()
-
-    HOLIDAYS = load_holidays_or_exit()
 
     while prev.weekday() >= 5 or prev in HOLIDAYS:
         prev -= timedelta(days=1)
@@ -1611,22 +1678,18 @@ def _safe_add30(s_min: str | None, s_max: str | None) -> str:
     if not base_str:
         return today.strftime("%Y%m%d")
 
-    try:
-        base_date = datetime.strptime(base_str, "%Y%m%d").date()
-    except ValueError:
-        raise ValueError(f"Nieprawidłowa data: {base_str}")
+    base_date = datetime.strptime(base_str, "%Y%m%d").date()
 
     if base_date == today:
         return today.strftime("%Y%m%d")
 
     target = base_date + timedelta(days=30)
-    HOLIDAYS = load_holidays_or_exit()
 
+    # 👉 korzystamy z globalnego HOLIDAYS
     if target.weekday() >= 5 or target in HOLIDAYS:
         target = get_previous_workday(datetime.combine(target, datetime.min.time()))
 
     return target.strftime("%Y%m%d")
-
 
 
 def gr_to_pln_comma(v_gr: int) -> str:
@@ -1770,31 +1833,67 @@ def przetworz_plik_xlsx(
             f.write("")
         print("[INFO] Po filtracji brak poprawnych wierszy.")
         return
+    try:
+        raporty = export_grouped_excels(
+            df=df,
+            out_dir="raporty_faktur_xlsx",
+            nazwa_spolki=company.upper()
+        )
+        print("[XLSX] Raporty zapisane:", len(raporty))
+    except Exception as e:
+        print(f"[XLSX] Błąd generowania raportów: {e}")
 
     raport_excell_dir = "raporty_faktur_xlsx"
-    xlsx_map = export_grouped_excels(df,out_dir=raport_excell_dir,nazwa_spolki=key)
+
     logging.info(f"[EXPORT] Zapisano raport z fakturami kontrahentów do folderu %s",raport_excell_dir)
 
+    df["__vat_gr"] = df["VAT"].apply(money_to_grosze)
+    df["__netto_gr"] = df["Netto"].apply(money_to_grosze)
     df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
-    df["__vat_gr"]    = df["VAT"].apply(money_to_grosze)
-    df["__netto_gr"]  = df["Netto"].apply(money_to_grosze)
-    df["__data_str"]  = df["Data wystawienia"].apply(serializacja_dat)  # YYYYMMDD
+
+    df["__data_str"] = df["Data wystawienia"].apply(serializacja_dat)  # YYYYMMDD
     df["__nip_clean"] = df["NIP"].astype(str).str.replace(r"\D", "", regex=True)
     df["__nip_two"] = df["NIP"]
+    df["__doc_no_norm"] = df["Numer dokumentu"].map(_norm_doc_no)
+
+    #  pobierz z bazy faktury już opłacone ( po nipie i nr_faktury)
+    paid_keys = get_paid_invoice_keys()  # set[(nip_clean, numer_faktury_norm)]
+
+    # oznaczanie już opłaconych wierszy
+    def _is_paid(row) -> bool:
+        nip = row["__nip_clean"]
+        if len(nip) != 10 or not nip.isdigit():
+            return False  # bez NIP-a nie jesteśmy w stanie sprawdzić -> traktujemy jako nowe
+        key = (nip, row["__doc_no_norm"])
+        return key in paid_keys
+
+    mask_paid = df.apply(_is_paid, axis=1)
+    num_paid = int(mask_paid.sum())
+
+    if num_paid:
+        skipped_path = os.path.join(
+            OUTPUT_DIR,
+            f"pominiete_oplacone_{key}_{ts}.csv"
+        )
+        df.loc[mask_paid, ["Numer dokumentu", "NIP", "Kontrahent", "Brutto"]].to_csv(
+            skipped_path,
+            index=False,
+            encoding="utf-8-sig"
+        )
+        print(f"[DB] Pominięto {num_paid} wierszy – faktury już opłacone (log: {skipped_path})")
+
+    # 3) wyrzucenie opłaconych faktury z dalszego przetwarzania
+    df = df.loc[~mask_paid].copy()
+
+    if df.empty:
+        print("[ELIXIR] Wszystkie faktury z pliku są już opłacone – nie generuję plików ELIXIR.")
+        return
 
     # klucz grupowania: NIP(10) albo fallback NAME::
     df["__grp_key"] = df.apply(
         lambda r: r["__nip_clean"] if len(r["__nip_clean"]) == 10 else f"NAME::{r['Kontrahent']}",
         axis=1
     )
-
-
-    df_to_db = df[["Numer dokumentu","Data wystawienia","__netto_gr","__vat_gr","__brutto_gr","__nip_two"]]
-
-    #poprawić
-    # if not df.empty:
-    #     logging.info("[DB] Zapisuję dane faktur do bazy danych...")
-    #     zapisz_faktury_do_bazy(df,company)
 
     # --- agregacja: kontrahent/dzień (data wpływu) ---
     df_day = df.loc[df["__data_str"].notna()].copy()
@@ -1917,10 +2016,8 @@ def przetworz_plik_xlsx(
                 data_wplywu_ddmmyy = row["data_wplywu_ddmmyy"]
                 informacja = (f"{nip_for_ref}{data_wplywu_ddmmyy}")
 
-                inv = sanitize_text(str(row.get("first_doc", "")))
-
                 vat_txt = gr_to_pln_comma(kw_vat_gr)
-                # szczegoly.strip('"')
+
                 szczegoly = (
                     f"/VAT/{vat_txt}|"
                     f"/IDC/{nip_clean or 'NA'}|"
@@ -1971,7 +2068,7 @@ def przetworz_plik_xlsx(
             nip_for_ref = nip_clean if valid_nip else "NA"
             data_wplywu_ddmmyy = row["data_wplywu_ddmmyy"]
             informacja = trim_to(f"{nip_for_ref}{data_wplywu_ddmmyy}", 19)
-            inv = sanitize_text(str(row.get("first_doc", "")))
+
             vat_txt = gr_to_pln_comma(kw_vat_gr)
 
             szczegoly = (
@@ -2030,23 +2127,17 @@ def przetworz_plik_xlsx(
         total_saved += len(day_lines)
 
     print(f"[ELIXIR] Łącznie zapisanych rekordów (wszystkie dni): {total_saved}")
+
     # zapis faktur do bazy danych
-    # if getattr(args, "save_db", False):
-    #     try:
-    #         logging.info("[DB] Rozpoczynam zapis faktur do bazy...")
-    #         # przygotuj dane: df - wszystkie faktury, wynik_faktur - dane do bazy
-    #         wynik_faktur = []
-    #         for _, row in agg.iterrows():
-    #             wynik_faktur.append({
-    #                 "ok": True,
-    #                 "nip": str(row["nip_clean"]),
-    #                 "id": str(row["first_doc"]),
-    #             })
-    #         _ = zapisz_faktury_do_bazy(wynik_faktur, df)
-    #     except Exception as e:
-    #         logging.error("[DB] Błąd zapisu faktur do bazy: %s", e)
-    # else:
-    #     logging.info("[DB] Pominięto zapis do bazy (brak flagi --save-db).")
+    if getattr(args, "save_db", False):
+        try:
+            logging.info("[DB] Rozpoczynam zapis faktur do bazy...")
+            # tu zapisujemy dokładnie te faktury, które poszły do ELIXIR-a
+            zapisz_faktury_do_bazy(df_day, company.upper())
+        except Exception as e:
+            logging.error("[DB] Błąd zapisu faktur do bazy: %s", e)
+    else:
+        logging.info("[DB] Pominięto zapis do bazy (brak flagi --save-db).")
 
 
 # --- CLI aplikacji ---
