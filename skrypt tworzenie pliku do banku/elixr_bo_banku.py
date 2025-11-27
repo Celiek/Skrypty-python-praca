@@ -669,12 +669,12 @@ def export_error_log(error_log: list[dict], out_csv_path: str):
     df_all.to_csv(out_csv_path, index=False, encoding="utf-8-sig")
     print(f"[VALID] Pełny log błędów zapisany: {out_csv_path}")
 
-    # podział per-typ
-    for t, sub in df_all.groupby("type"):
-        safe_t = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(t))
-        per_type_path = out_csv_path.replace(".csv", f"_{safe_t}.csv")
-        sub.to_csv(per_type_path, index=False, encoding="utf-8-sig")
-        print(f"[VALID] Log '{t}' zapisany: {per_type_path}")
+    # podział i zapis błędów per-typ
+    # for t, sub in df_all.groupby("type"):
+    #     safe_t = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(t))
+    #     per_type_path = out_csv_path.replace(".csv", f"_{safe_t}.csv")
+    #     sub.to_csv(per_type_path, index=False, encoding="utf-8-sig")
+    #     print(f"[VALID] Log '{t}' zapisany: {per_type_path}")
 
 def nip_digits(nip: str) -> str:
     return re.sub(r"\D", "", str(nip or ""))
@@ -1650,7 +1650,7 @@ def load_holidays_or_exit() -> set:
 
         holidays.add(datetime(year, months[month_name.lower()], int(day)).date())
 
-    print(f"[HOLIDAYS] Załadowano {len(holidays)} świąt z NBP.")
+    # print(f"[HOLIDAYS] Załadowano {len(holidays)} świąt z NBP.")
     return holidays
 
 # -------------------------------

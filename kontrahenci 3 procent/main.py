@@ -171,7 +171,7 @@ if __name__ == "__main__":
     df = pd.read_excel(args.input)
     df = clean_df(df)
 
-    # ✅ FIX: parsowanie wszystkich dat w fakturach
+    # parsowanie wszystkich dat w fakturach
     if "Data wystawienia" in df.columns:
         df["Data wystawienia"] = parse_date_series(df["Data wystawienia"])
 
@@ -203,7 +203,7 @@ if __name__ == "__main__":
         kontrahenci_df = pd.read_excel(args.filter_xlsx)
         kontrahenci_df["NIP"] = kontrahenci_df["NIP"].astype(str).apply(clean_nip)
 
-        # ✅ FIX — poprawne parsowanie dat w filtrze
+        # poprawne parsowanie dat w filtrze
         if "Od kiedy prowizja 3%" in kontrahenci_df.columns:
             kontrahenci_df["Od kiedy prowizja 3%"] = parse_date_series(
                 kontrahenci_df["Od kiedy prowizja 3%"]

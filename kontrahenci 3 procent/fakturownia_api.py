@@ -101,9 +101,6 @@ def get_faktur(date_from: str, date_to: str):
 
         data = r.json()
 
-        # print("[DEBUG] odpowiedź z api")
-        # print(data)
-
         if not data:
             break
         all_invoices.extend(data)

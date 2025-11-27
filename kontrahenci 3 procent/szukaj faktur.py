@@ -1,7 +1,8 @@
-import pandas as pd
-from sqlalchemy import create_engine
-from dotenv import load_dotenv
 import os
+
+import pandas as pd
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 # === konfiguracja połączenia z bazą ===
 load_dotenv()
