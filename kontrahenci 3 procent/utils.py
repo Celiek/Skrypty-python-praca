@@ -33,6 +33,29 @@ def db_conn():
 def _only_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or "")).strip()
 
+def parse_date_series(s: pd.Series) -> pd.Series:
+    """
+    Naprawa mieszanych formatów dat z Excela — działa dla:
+    - typów datetime (zostawiamy jak jest)
+    - dd.mm.yyyy
+    - dd-mm-yyyy
+    - yyyy-mm-dd
+    - tekstów z NBSP i spacjami
+    """
+
+    # Jeśli Excel już dał datę — NIE ruszamy
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+
+    return (
+        s.astype(str)
+        .str.strip()
+        .str.replace("\u00A0", "", regex=False)  # NBSP
+        .str.replace(" ", "", regex=False)      # spacje
+        .str.replace("/", "-", regex=False)     # normalize separator
+        .pipe(lambda x: pd.to_datetime(x, errors="coerce", dayfirst=True))
+    )
+
 def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     if not s:
         return "plik"
@@ -121,6 +144,35 @@ def clean_df(df : pd.DataFrame) -> pd.DataFrame:
 
     df["NIP_clean"] = df["NIP"].apply(clean_nip)
 
+    # usuwanie danych
+    payer_norm = (
+        df["Płatnik"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    mask_allegro = payer_norm.isin({"ALLEGRO", "ALLEGRO PŁATNOŚCI"})
+    removed_count = mask_allegro.sum()
+
+    if removed_count > 0:
+        removed_values = (
+            df.loc[mask_allegro, "Płatnik"]
+            .value_counts()
+            .to_dict()
+        )
+
+        logging.info(
+            f"[FILTER] Usunięto {removed_count} wierszy z płatnikiem ALLEGRO."
+        )
+        logging.debug(
+            f"[FILTER] Szczegóły usuniętych płatników: {removed_values}"
+        )
+
+        # usunięcie wierszy
+    df = df.loc[~mask_allegro].reset_index(drop=True)
+
+
     subset_cols = ["Data wystawienia", "Numer dokumentu", "NIP_clean", "Netto", "VAT", "Brutto"]
 
     # Znajdź duplikaty
@@ -135,7 +187,7 @@ def clean_df(df : pd.DataFrame) -> pd.DataFrame:
                 f"Data: {row['Data wystawienia']} | Netto: {row['Netto']} | Brutto: {row['Brutto']}"
             )
     else:
-        logging.info("[DUPLIKATY] Brak powtórzonych faktur.")
+        logging.info("[DUPLIKATY] Brak powtórzonych faktur w pliku xlsx.")
 
     # Usuń duplikaty (zostaw pierwsze wystąpienie)
     df = df.drop_duplicates(subset=subset_cols, keep="first")

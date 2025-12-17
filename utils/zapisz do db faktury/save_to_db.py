@@ -215,7 +215,7 @@ def zapisz_faktury_do_bazy(df_to_db: pd.DataFrame, spolka: str):
 # ============================================================
 
 def main():
-    file = r"C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\skrypt tworzenie pliku do banku\test shumee 17.11 - bez dupl.xlsx"
+    file = r"C:\Users\DELL\Documents\Skrypty\Skrypty-python-praca\skrypt tworzenie pliku do banku\Test greatstore 26.11.xlsx"
     df = pd.read_excel(file)
 
     df = handle_duplicates(df, action="drop_keep_first")
@@ -229,7 +229,7 @@ def main():
     if brak:
         raise ValueError(f"Brak kolumn: {', '.join(sorted(brak))}")
 
-    zapisz_faktury_do_bazy(df, "shumee")
+    zapisz_faktury_do_bazy(df, "greatstore")
     print("zapisane")
 
 

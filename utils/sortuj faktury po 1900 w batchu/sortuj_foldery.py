@@ -8,9 +8,9 @@ from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 
 # ===================== KONFIG ==========================
-SOURCE_DIR = r"C:\Users\DELL\Desktop\extra_posortowane_17.11.2025\EXTRASTORE"
-TARGET_DIR = r"C:\Users\DELL\Desktop\extra_Drop"
-NIP_FILE = r"C:\Users\DELL\Downloads\ListaKontrahentówdo ksiegowania Excell.xlsx"
+SOURCE_DIR = r"C:\Users\DELL\Desktop\great_posortowane"
+TARGET_DIR = r"C:\Users\DELL\Desktop\great 15.12"
+NIP_FILE = r"ListaKontrahentówdo ksiegowania Excell.xlsx"
 BATCH_SIZE = 1900
 
 # Regex wyłapujący wszystkie typy NIP

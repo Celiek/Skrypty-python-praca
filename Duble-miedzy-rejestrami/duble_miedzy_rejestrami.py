@@ -4,14 +4,14 @@ from rapidfuzz import distance
 # TODO
 # sprawdzać po kombinacjach kolumn nie po pojedyńczych
 
-# === KONFIGURACJA ===
-plik1 = "rejestrtestgreatstore.xlsx"
-plik2 = "zakupkrajgreatstore.xlsx"
-plik_wynikowy = "duplikaty_po_nip_i_kwotach_07.11.2025.xlsx"
+plik1 = r"C:\Users\DELL\Downloads\GI_SHumee.xlsx"
+plik2 = r"C:\Users\DELL\Sm Dropbox\Faktury 3 %\shumee\10.12.2025\raporty\raport_9730408592_Global_Service_Group_Pawe_Kapustka.xlsx"
+plik_wynikowy = "duplikaty sm zaległe.xlsx"
 
-THRESHOLD_DIST = 4   # maksymalna różnica znaków w nazwie dokumentu
+THRESHOLD_DIST = 2   # maksymalna różnica znaków w nazwie dokumentu
+TOLERANCJA_PLN = 1   # dopuszczalna różnica kwot w PLN
 
-# === 1. Wczytanie danych ===
+# === 1. Wczytanie danych ===FV
 df1 = pd.read_excel(plik1)
 df2 = pd.read_excel(plik2)
 
@@ -33,41 +33,38 @@ def normalizuj_minimalnie(df):
 df1 = normalizuj_minimalnie(df1)
 df2 = normalizuj_minimalnie(df2)
 
-# === 3. ETAP 1 — identyczne rekordy 1:1 ===
+# === 3. ETAP 1 — identyczne rekordy 1:1 (z tolerancją ±1 PLN) ===
 mask = (
     (df1['NIP'].isin(df2['NIP'])) &
-    (df1['Netto'].isin(df2['Netto'])) &
-    (df1['Brutto'].isin(df2['Brutto'])) &
-    (df1['VAT'].isin(df2['VAT'])) &
+    (df1.apply(lambda r: any(abs(df2['Netto'] - r['Netto']) <= TOLERANCJA_PLN), axis=1)) &
+    (df1.apply(lambda r: any(abs(df2['Brutto'] - r['Brutto']) <= TOLERANCJA_PLN), axis=1)) &
+    (df1.apply(lambda r: any(abs(df2['VAT'] - r['VAT']) <= TOLERANCJA_PLN), axis=1)) &
     (df1['Numer dokumentu'].isin(df2['Numer dokumentu']))
 )
 
 duplikaty_oczywiste = df1[mask].merge(
     df2,
-    on=['NIP', 'Netto', 'Brutto', 'VAT', 'Numer dokumentu'],
+    on=['NIP', 'Numer dokumentu'],
     how='inner',
     suffixes=('_plik1', '_plik2')
 )
 
-# Usuń te rekordy z dalszego porównywania
 if not duplikaty_oczywiste.empty:
     print(f"✅ Znaleziono {len(duplikaty_oczywiste)} oczywistych duplikatów 1:1.")
     df1 = df1[~mask]
-    # Usuń z df2 również rekordy, które już wystąpiły
     df2 = df2[~df2['Numer dokumentu'].isin(duplikaty_oczywiste['Numer dokumentu'])]
-
 else:
     print("ℹ️ Brak oczywistych duplikatów 1:1.")
 
-# === 4. ETAP 2 — nieoczywiste duplikaty (fuzzy matching) ===
+# === 4. ETAP 2 — nieoczywiste duplikaty (fuzzy matching, ±1 PLN) ===
 wyniki = []
 
 for i, r1 in df1.iterrows():
     kandydaci = df2[
         (df2['NIP'] == r1['NIP']) &
-        (df2['Netto'] == r1['Netto']) &
-        (df2['Brutto'] == r1['Brutto']) &
-        (df2['VAT'] == r1['VAT'])
+        (abs(df2['Netto'] - r1['Netto']) <= TOLERANCJA_PLN) &
+        (abs(df2['Brutto'] - r1['Brutto']) <= TOLERANCJA_PLN) &
+        (abs(df2['VAT'] - r1['VAT']) <= TOLERANCJA_PLN)
     ]
 
     if kandydaci.empty:
@@ -84,9 +81,12 @@ for i, r1 in df1.iterrows():
                 "Numer dokumentu_plik1": r1['Numer dokumentu'],
                 "Numer dokumentu_plik2": r2['Numer dokumentu'],
                 "różnica_znaków": dist,
-                "Netto": r1['Netto'],
-                "Brutto": r1['Brutto'],
-                "VAT": r1['VAT']
+                "Netto_plik1": r1['Netto'],
+                "Netto_plik2": r2['Netto'],
+                "Brutto_plik1": r1['Brutto'],
+                "Brutto_plik2": r2['Brutto'],
+                "VAT_plik1": r1['VAT'],
+                "VAT_plik2": r2['VAT']
             })
 
 duplikaty_nieoczywiste = pd.DataFrame(wyniki)
@@ -100,8 +100,9 @@ if not duplikaty_nieoczywiste.empty:
         ])),
         axis=1
     )
-
-    duplikaty_nieoczywiste = duplikaty_nieoczywiste.drop_duplicates(subset=['NIP', 'para_klucz'], keep='first')
+    duplikaty_nieoczywiste = duplikaty_nieoczywiste.drop_duplicates(
+        subset=['NIP', 'para_klucz'], keep='first'
+    )
     duplikaty_nieoczywiste = duplikaty_nieoczywiste.drop(columns=['para_klucz'])
 
 # === 6. Zapis do Excela w dwóch arkuszach ===

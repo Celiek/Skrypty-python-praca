@@ -1,16 +1,35 @@
 import os
 import logging
 import re
+import json
+from pathlib import Path
+from typing import Dict
+from tqdm import tqdm
 
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 from utils import _safe_name
+from filelock import FileLock
+
 
 from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
+# plik przechowujący liczbę faktur
+BASE_DIR = Path(__file__).resolve().parent
+COUNTER_FILE = BASE_DIR / "utils" / "licznik_faktur.json"
+LOCK_FILE = COUNTER_FILE.with_suffix(".lock")
+
+# PRefixy spółek
+COMPANY_PREFIX = {
+    "SHUMEE": "SM",
+    "GREATSTORE": "GS",
+    "EXTRASTORE": "EX",
+    # jeśli pojawi się 4. spółka:
+    # "TSM3": "TSM3"
+}
 
 FAKTUROWNIA_URL = os.getenv("FAKTUROWNIA_URL", "https://shumee.fakturownia.pl")
 FAKTUROWNIA_API = os.getenv("FAKTUROWNIA_API", "https://shumee.fakturownia.pl")
@@ -30,6 +49,7 @@ MIESIACE_PL = {
     "November": "listopad",
     "December": "grudzień"
 }
+
 
 def parse_address(addr: str):
     """Rozdziela adres z bazy (np. 'ul. Warszawska 12 | 00-123 Warszawa') na street, post_code, city."""
@@ -56,6 +76,40 @@ def parse_address(addr: str):
 
     return street, post_code, city
 
+def _load_counter() -> Dict[str, int]:
+    if COUNTER_FILE.exists():
+        try:
+            # poprawka: json.load() → json.loads(COUNTER_FILE.read_text())
+            return json.loads(COUNTER_FILE.read_text())
+        except json.JSONDecodeError:
+            logging.error("⚠️ licznik_faktur.json uszkodzony — start od zera")
+            return {}
+    return {}
+
+def _save_counter(counter: Dict[str, int]):
+    COUNTER_FILE.write_text(json.dumps(counter, indent=4))
+
+def get_invoice_number(company: str, previous_month: date) -> str:
+    """
+    Zwraca kolejny numer faktury w formacie:
+        X/MM/YYYY
+    z podziałem na spółki i miesiące.
+    """
+    with FileLock(str(LOCK_FILE)):
+        company_key = company.upper().strip()
+        prefix = COMPANY_PREFIX.get(company_key, company_key[:3])  # fallback
+
+        key = f"{company_key}/{previous_month.year}-{previous_month.month:02d}"
+
+        counter = _load_counter()
+        current_no = counter.get(key, 0) + 1
+        counter[key] = current_no
+        _save_counter(counter)
+        issue_date = datetime.now().date()
+        year_yy = str(previous_month.year)[-2:]
+
+        return f"{current_no}/{issue_date.month}/{year_yy}/{prefix}"
+
 def get_invoice_public_url(invoice_id: int) -> str | None:
     url = f"{FAKTUROWNIA_URL}/invoices/{invoice_id}.json"
     try:
@@ -81,51 +135,104 @@ def get_invoice_number_from_api(invoice_id: int) -> str:
         logging.warning(f"[FAKTUROWNIA] Nie udało się pobrać numeru faktury {invoice_id}: {e}")
         return f"FAKTURA-{invoice_id}"
 
+from tqdm import tqdm
 
-def get_faktur(date_from: str, date_to: str):
+def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
     base_url = f"{FAKTUROWNIA_URL}/invoices.json"
     api_token = API_KEY
+
     all_invoices = []
     page = 1
-    while True:
-        params = {
-            "api_token": api_token,
-            "period": "more",
-            "date_from": date_from,
-            "date_to": date_to,
-            "per_page": 100,
-            "page": page,
-        }
-        r = requests.get(base_url, params=params, timeout=30)
-        r.raise_for_status()
 
-        data = r.json()
+    with tqdm(desc="📡 Pobieranie listy faktur", unit="strona") as pbar:
+        while True:
+            params = {
+                "api_token": api_token,
+                "period": "more",
+                "date_from": date_from,
+                "date_to": date_to,
+                "per_page": 100,
+                "page": page,
+            }
 
-        if not data:
-            break
-        all_invoices.extend(data)
-        page += 1
-    filtered = [inv for inv in all_invoices if str(inv.get("number", "")).strip().upper().endswith(("/SM","/GS","/EX","/TSM3"))]
-    logging.info(f"[Fakturownia] Znaleziono {len(filtered)} faktur między {date_from}–{date_to}")
+            r = requests.get(base_url, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+
+            if not data:
+                break
+
+            all_invoices.extend(data)
+            page += 1
+            pbar.update(1)
+
+    filtered = [
+        inv for inv in all_invoices
+        if str(inv.get("number", ""))
+        .strip()
+        .upper()
+        .endswith(company_suffix)
+    ]
+
+    logging.info(
+        f"[Fakturownia] Znaleziono {len(filtered)} faktur "
+        f"({company_suffix}) między {date_from}–{date_to}"
+    )
+
     out_dir = os.path.join("faktury", datetime.today().strftime("%Y-%m-%d"))
     os.makedirs(out_dir, exist_ok=True)
+
     pobrane = []
-    for inv in filtered:
+
+    for inv in tqdm(
+        filtered,
+        desc=" Pobieranie faktur kontrahentów: ",
+        unit="fv",
+        ncols=100,
+    ):
         inv_id = inv.get("id")
         pdf_url = f"{FAKTUROWNIA_URL}/invoices/{inv_id}.pdf"
-        nip = inv.get("buyer_tax_no")
-        name = inv.get("buyer_name")
-        num = inv.get("number")
-        out_path = os.path.join(out_dir, f"{_safe_name(f'{name}_{nip}_{num}')}.pdf")
+
+        nip = inv.get("buyer_tax_no", "brak_nip")
+        name = inv.get("buyer_name", "brak_nazwy")
+        num = inv.get("number", "brak_numeru")
+
+        out_path = os.path.join(
+            out_dir,
+            f"{_safe_name(f'{name}_{nip}_{num}')}.pdf"
+        )
+
         try:
-            with requests.get(pdf_url, params={"api_token": api_token}, stream=True, timeout=60) as r:
+            with requests.get(
+                pdf_url,
+                params={"api_token": api_token},
+                stream=True,
+                timeout=60,
+            ) as r:
                 r.raise_for_status()
                 with open(out_path, "wb") as f:
                     for chunk in r.iter_content(8192):
                         f.write(chunk)
-            pobrane.append({"id": inv_id, "buyer_tax_no": nip, "path": out_path, "ok": True})
+
+            pobrane.append({
+                "id": inv_id,
+                "buyer_tax_no": nip,
+                "number": num,
+                "path": out_path,
+                "ok": True,
+            })
+
         except Exception as e:
             logging.error(f"[PDF] Błąd pobierania {num}: {e}")
+            pobrane.append({
+                "id": inv_id,
+                "buyer_tax_no": nip,
+                "number": num,
+                "path": out_path,
+                "ok": False,
+                "error": str(e),
+            })
+
     return filtered, pobrane
 
 def parse_address(addr: str):
@@ -187,10 +294,15 @@ def dodaj_faktury(spolka: str, items: list[dict], department_id: int,issue_date:
 
             street, post_code, city = parse_address(addr_raw)
 
+            nr_faktury = get_invoice_number(spolka, poprzedni)
+
+            # dodać zmianę numeru faktury
             payload = {
                 "api_token": api_token,
                 "invoice": {
                     "kind": "vat",
+                    "number": nr_faktury,
+                    # "ignore_duplicate_number":1,
                     "issue_date": today.strftime("%Y-%m-%d"),
                     "sell_date": issue_date.strftime("%Y-%m-%d"),
                     "payment_to": payment_to.strftime("%Y-%m-%d"),

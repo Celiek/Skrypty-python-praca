@@ -1,12 +1,14 @@
 import pandas as pd
 
 # === KONFIGURACJA ===
-plik2 = "rejestrtestgreatstore.xlsx"
-plik1 = "zakupkrajgreatstore.xlsx"
-plik_wynikowy = "duplikaty shumee 14.10.25.xlsx"
+plik2 = r"zakup test shumee 17.11 folder.xlsx"
+plik1 = r"zrzut optima 01.07-20.11 shumee"
+plik_wynikowy = "duplikaty shumee 20.11.25.xlsx"
 
 # Kolumny po których porównujemy
-kolumny_kluczowe = ['Netto', 'Brutto', 'Vat', 'Nip', 'Numer dokumentu']
+kolumny_kluczowe = ['Netto', 'Brutto', 'Nip', 'Numer dokumentu','Data wystawienia']
+
+#kolumny_kluczowe = ['Numer dokumentu']
 
 # === 1. Wczytanie danych ===
 df1 = pd.read_excel(plik1)
@@ -20,10 +22,9 @@ df2.columns = df2.columns.str.strip().str.lower()
 mapowanie = {
     'netto': 'Netto',
     'brutto': 'Brutto',
-    'vat': 'Vat',
     'nip': 'Nip',
     'numer dokumentu': 'Numer dokumentu',
-    "'numer dokumentu": 'Numer dokumentu'  # czasem Excel daje cudzysłów
+    "numer dokumentu": 'Numer dokumentu'  # czasem Excel daje cudzysłów
 }
 
 df1 = df1.rename(columns=mapowanie)
@@ -38,7 +39,7 @@ def normalizuj(df):
     df = df.copy()
     df['Nip'] = df['Nip'].astype(str).str.replace(r'\D', '', regex=True)  # tylko cyfry
 
-    for col in ['Netto', 'Brutto', 'Vat']:
+    for col in ['Netto', 'Brutto']:
         df[col] = (
             df[col].astype(str)
             .str.replace(',', '.', regex=False)
@@ -56,7 +57,7 @@ def normalizuj(df):
         .str.replace('\xa0', '', regex=False)  # usuwa niełamliwe spacje
         .str.replace('\t', '', regex=False)    # usuwa tabulatory
         .str.replace('\n', '', regex=False)    # usuwa nowe linie
-        .str.upper()                           # (opcjonalnie) ujednolica wielkość liter
+        #.str.upper()                           # (opcjonalnie) ujednolica wielkość liter
     )
 
     return df
