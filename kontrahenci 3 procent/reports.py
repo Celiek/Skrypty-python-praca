@@ -1,20 +1,36 @@
 from utils import _slugify_filename
-import os
-import pandas as pd
-import logging
-from decimal import Decimal, ROUND_HALF_UP
 
 
-def export_grouped_excels(df, spolka, data_wystawienia=None, out_root="raporty_xlsx"):
+def export_grouped_excels(
+    df,
+    spolka,
+    data_wystawienia=None,
+    out_root="raporty_xlsx",
+    out_ready_root="raporty_gotowe",
+):
     from datetime import date
+    from decimal import Decimal, ROUND_HALF_UP
+    import os
+    import logging
+    import pandas as pd
 
     if not data_wystawienia:
         data_wystawienia = date.today().isoformat()
 
-    out_dir = os.path.join(out_root, spolka.lower(), data_wystawienia)
-    os.makedirs(out_dir, exist_ok=True)
+    spolka = spolka.lower()
 
-    # Kolumny do raportu
+    # ===============================
+    # 📁 KATALOGI WYJŚCIOWE
+    # ===============================
+    out_dir = os.path.join(out_root, spolka, data_wystawienia)
+    ready_dir = os.path.join(out_ready_root, spolka, data_wystawienia)
+
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(ready_dir, exist_ok=True)
+
+    # ===============================
+    # KOLUMNY WEJŚCIOWE
+    # ===============================
     keep_cols = [
         "NIP",
         "Data wystawienia",
@@ -28,11 +44,17 @@ def export_grouped_excels(df, spolka, data_wystawienia=None, out_root="raporty_x
 
     results = {}
 
-    # Raport zbiorczy (każdy NIP jako osobny arkusz)
+    # ===============================
+    # 📊 RAPORT ZBIORCZY (1 ARKUSZ)
+    # ===============================
     summary_writer_path = os.path.join(out_dir, "raport_zbiorczy.xlsx")
     writer = pd.ExcelWriter(summary_writer_path, engine="openpyxl")
 
-    # Grupowanie po NIP
+    summary_frames = []  # 👈 TU ZBIERAMY WSZYSTKIE POZYCJE
+
+    # ===============================
+    # 🔁 GRUPOWANIE PO NIP
+    # ===============================
     for nip, sub in df.groupby("NIP"):
         nip_str = str(nip).strip() or "BRAK_NIP"
         kontrahent = str(sub["Kontrahent"].iloc[0]).strip()
@@ -40,67 +62,105 @@ def export_grouped_excels(df, spolka, data_wystawienia=None, out_root="raporty_x
 
         sub = sub.copy()
 
-        # PRECYZYJNE LICZENIE NA DECIMAL
+        # ===============================
+        # 💰 LICZENIE PROWIZJI (DECIMAL)
+        # ===============================
         sub["Netto_dec"] = sub["Netto"].apply(lambda x: Decimal(str(x)))
 
-        # Bezbłędna suma netto
         suma_netto_dec = sum(sub["Netto_dec"])
-
-        # Globalna prowizja jak na FV – Decimal, bankowe zaokrąglenie
         suma_globalna_dec = (suma_netto_dec * Decimal("0.03")).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
 
         if suma_globalna_dec < Decimal("0.00"):
             logging.warning(
-                f"[INFO] [XLSX] [Ujemna prowizja] dla NIP {nip_str} "
-                f"({suma_globalna_dec}) — raport pominięty."
+                f"[XLSX] Ujemna prowizja dla NIP {nip_str} – pominięto"
             )
             continue
 
-        # Prowizje per pozycja – Decimal
-        sub["Prowizja_3proc"] = sub["Netto_dec"].apply(
-            lambda x: (x * Decimal("0.03")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        sub["Kwota 3% Netto"] = sub["Netto_dec"].apply(
+            lambda x: (x * Decimal("0.03")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
         )
 
-        partial_sum_dec = sum(sub["Prowizja_3proc"])
-        fix_diff = suma_globalna_dec - partial_sum_dec
+        diff = suma_globalna_dec - sum(sub["Kwota 3% Netto"])
+        if diff != Decimal("0.00"):
+            sub.loc[sub.index[-1], "Kwota 3% Netto"] += diff
 
-        # Jeśli jest różnica grosza → dopisz do ostatniej pozycji
-        if fix_diff != Decimal("0.00"):
-            sub.loc[sub.index[-1], "Prowizja_3proc"] += fix_diff
-            # logging.info(
-            #     f"[FIX] Korekta grosza dla NIP {nip_str}: {fix_diff} "
-            #     f"→ prowizja = {suma_globalna_dec}"
-            # )
-
-        # Zamiana na string dla XLSX
-        sub["Prowizja_3proc"] = sub["Prowizja_3proc"].astype(str)
-
-        # Usuwamy tymczasową kolumnę
+        sub["Kwota 3% Netto"] = sub["Kwota 3% Netto"].astype(str)
         sub.drop(columns=["Netto_dec"], inplace=True)
 
-        # Podsumowanie
+        # ===============================
+        # 📄 RAPORT INDYWIDUALNY
+        # ===============================
         summary = pd.DataFrame([{
             "Kontrahent": kontrahent,
             "NIP": nip_str,
             "Suma_prowizji": str(suma_globalna_dec)
         }])
 
-        # Raport indywidualny
-        raport = pd.concat([sub, pd.DataFrame([{}]), summary], ignore_index=True)
+        raport_indywidualny = pd.concat(
+            [sub, pd.DataFrame([{}]), summary],
+            ignore_index=True
+        )
 
-        filename = f"raport_{nip_str}_{kontrahent_slug}.xlsx"
-        fpath = os.path.join(out_dir, filename)
-        raport.to_excel(fpath, index=False, sheet_name="Raport")
+        path_std = os.path.join(
+            out_dir,
+            f"raport_{nip_str}_{kontrahent_slug}.xlsx"
+        )
+        raport_indywidualny.to_excel(
+            path_std,
+            index=False,
+            sheet_name="Raport"
+        )
 
-        results[nip_str] = fpath
-        logging.info(f"[XLSX] Raport zapisany: {fpath}")
+        path_ready = os.path.join(
+            ready_dir,
+            f"{nip_str}.xlsx"
+        )
+        raport_indywidualny.to_excel(
+            path_ready,
+            index=False,
+            sheet_name="Raport"
+        )
 
-        # Wpis do raportu zbiorczego
-        sub.to_excel(writer, sheet_name=nip_str[-10:], index=False)
+        logging.info(f"[XLSX] Zapisano: {path_std}")
+        logging.info(f"[XLSX] Zapisano (gotowe): {path_ready}")
 
-    # Zapis raportu zbiorczego
+        results[nip_str] = {
+            "standard": path_std,
+            "gotowy": path_ready,
+        }
+
+        # ===============================
+        # ➕ DODANIE DO RAPORTU ZBIORCZEGO
+        # ===============================
+        summary_frames.append(
+            sub[[
+                "Data wystawienia",
+                "Kontrahent",
+                "NIP",
+                "Numer dokumentu",
+                "Netto",
+                "VAT",
+                "Brutto",
+                "Kwota 3% Netto",
+            ]]
+        )
+
+    # ===============================
+    # 📊 ZAPIS RAPORTU ZBIORCZEGO
+    # ===============================
+    if summary_frames:
+        df_summary = pd.concat(summary_frames, ignore_index=True)
+
+        df_summary.to_excel(
+            writer,
+            sheet_name="RAPORT_ZBIORCZY",
+            index=False
+        )
+
     writer.close()
     logging.info(f"[XLSX] Raport zbiorczy zapisano: {summary_writer_path}")
 

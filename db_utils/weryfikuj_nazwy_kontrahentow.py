@@ -143,7 +143,7 @@ class RegonScraper:
         if len(cells) < 2:
             return None
 
-        return cells[1]  # NAZWA PODMIOTU
+        return cells[2]  # NAZWA PODMIOTU
 
 
 # =====================================================

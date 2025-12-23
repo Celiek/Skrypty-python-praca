@@ -1,158 +1,385 @@
 import logging
+import math
 import os
 import re
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from typing import Dict
 
 import pandas as pd
-import requests
 import unicodedata
-from dotenv import load_dotenv
-from pandas.core.interchange.dataframe_protocol import DataFrame
-from psycopg2.extras import RealDictCursor
+from fastapi import requests
+from psycopg2.extras import execute_values
 
-from utils import db_conn
+from utils import clean_nip, db_conn
 
-load_dotenv()
-
-def get_addresses_from_db() -> dict[str, str]:
-    """
-    Pobiera NIP i adres z tabeli 'merchanci' i zwraca słownik {NIP: adres}.
-    Działa niezależnie od typu kursora (tuple lub dict).
-    """
-    result = {}
-    query = """
-    SELECT nip, adres
-    FROM merchanci
-    WHERE nip IS NOT NULL
-      AND adres IS NOT NULL;
-    """
-
-    # otwieramy połączenie do bazy
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            rows = cur.fetchall()
-            print(f"[DEBUG] Pobranie {len(rows)} wierszy z merchanci.")
-
-            # sprawdzamy typ pierwszego rekordu (tuple vs dict)
-            if len(rows) > 0:
-                sample = rows[0]
-                if isinstance(sample, dict):
-                    # jeśli RealDictCursor — klucze
-                    for row in rows:
-                        nip_raw = row["nip"]
-                        addr_raw = row["adres"]
-                        if nip_raw and addr_raw:
-                            result[str(nip_raw).strip()] = str(addr_raw).strip()
-                else:
-                    # jeśli zwykły cursor — indeksy
-                    for row in rows:
-                        nip_raw = row[0]
-                        addr_raw = row[1]
-                        if nip_raw and addr_raw:
-                            result[str(nip_raw).strip()] = str(addr_raw).strip()
-
-    print(f"[DEBUG] Utworzono mapę adresów: {len(result)} rekordów.")
-    return result
-
-def insert_new_invoices_from_xlsx(df: DataFrame, company: str):
-    df_to_db = df.copy()
-    spolka = company.strip()
-
-    if df_to_db.empty:
-        logging.info("[DB] Brak danych do zapisania.")
-        return
-
-    required = {"Numer dokumentu", "Data wystawienia", "Netto", "VAT", "Brutto", "NIP"}
-    missing = required - set(df_to_db.columns)
-    if missing:
-        raise ValueError(f"[DB] Brakuje kolumn: {', '.join(sorted(missing))}")
-
-    # Normalizacja NIP
-    df_to_db["__nip"] = (
-        df_to_db["NIP"]
-        .astype(str)
-        .str.replace(r"\D", "", regex=True)
-        .str.strip()
-    )
-
-    inserted = 0
-    skipped = 0
-
-    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-
-        # Pobieramy wszystkie istniejące faktury
-        cur.execute("""
-            SELECT nip, numer_faktury, nazwa_spolki,
-                   kwota_netto, kwota_vat, kwota_brutto
-            FROM faktury_do_prowizji
-        """)
-
-        # Klucz → wartości kwot
-        existing = {
-            (r["nip"], r["numer_faktury"], r["nazwa_spolki"]):
-                (float(r["kwota_netto"]),
-                 float(r["kwota_vat"]),
-                 float(r["kwota_brutto"]))
-            for r in cur.fetchall()
-        }
-
-        for _, row in df_to_db.iterrows():
-
-            numer = str(row["Numer dokumentu"]).strip()
-            nip = row["__nip"]
-
-            if not numer or not nip:
-                skipped += 1
-                continue
-
-            key = (nip, numer, spolka)
-
-            kw_netto = float(row["Netto"])
-            kw_vat = float(row["VAT"])
-            kw_brutto = float(row["Brutto"])
-
-            # duplikat
-            if key in existing:
-                old = existing[key]
-                if old == (kw_netto, kw_vat, kw_brutto):
-                    logging.info(f"[DB] Duplikat: FV={numer} NIP={nip} SP={spolka} – pomijam")
-                    skipped += 1
-                    continue
-                else:
-                    logging.info(f"[DB] Korekta: FV={numer} {old[2]} zł → {kw_brutto} zł")
-
-            data = pd.to_datetime(row["Data wystawienia"], errors="coerce")
-            data = data.date() if not pd.isna(data) else None
-
-            try:
-                cur.execute("""
-                    INSERT INTO faktury_do_prowizji (
-                        numer_faktury, data_wystawienia,
-                        kwota_netto, kwota_vat, kwota_brutto,
-                        nip, nazwa_spolki
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    numer, data,
-                    kw_netto, kw_vat, kw_brutto,
-                    nip, spolka
-                ))
-
-                existing[key] = (kw_netto, kw_vat, kw_brutto)
-                inserted += 1
-
-            except Exception as e:
-                logging.error(f"[DB] Błąd INSERT {numer}/{nip}: {e}")
-                skipped += 1
-
-        conn.commit()
-
-    logging.info(f"[DB] Wynik: {inserted} dodanych, {skipped} pominiętych.")
-
+# =====================================================
+# CONFIG
+# =====================================================
 
 FAKTUROWNIA_API = os.getenv("FAKTUROWNIA_API", "https://shumee.fakturownia.pl")
 FAKTUROWNIA_TOKEN = os.getenv("FAKTUROWNIA_TOKEN")
 
+# =====================================================
+# MERCHANCI
+# =====================================================
+
+def norm_amount(val) -> Decimal:
+    if val is None:
+        return Decimal("0.00")
+
+    # pandas / numpy NaN
+    if isinstance(val, float) and math.isnan(val):
+        return Decimal("0.00")
+
+    if pd.isna(val):
+        return Decimal("0.00")
+
+    # Decimal z bazy
+    if isinstance(val, Decimal):
+        return val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    # string z XLSX
+    s = str(val).strip()
+
+    if s == "":
+        return Decimal("0.00")
+
+    # zamiana przecinka na kropkę (PL XLSX!)
+    s = s.replace(",", ".")
+
+    try:
+        return Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        raise ValueError(f"❌ Nieprawidłowa kwota: {val!r}")
+
+def reserve_commission_invoice(company: str, nip: str, okres: str) -> bool:
+    """
+    Rezerwuje prawo do wystawienia FV prowizyjnej dla (company, nip, okres).
+    Zwraca True jeśli rezerwacja się udała (nie było wcześniej), False jeśli już istnieje.
+    """
+    nip_i = int(clean_nip(nip))
+    sql = """
+        INSERT INTO prowizje_fakturownia (nazwa_spolki, nip, okres)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (nazwa_spolki, nip, okres) DO NOTHING
+        RETURNING 1
+    """
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (company, nip_i, okres))
+        row = cur.fetchone()
+        conn.commit()
+
+    ok = row is not None
+    if not ok:
+        logging.warning(f"[IDEMPOTENCY] FV już istnieje/rezerwacja zajęta: spolka={company} nip={nip_i} okres={okres}")
+    return ok
+
+def finalize_commission_invoice(company: str, nip: str, okres: str, fakturownia_id: int, fakturownia_nr: str | None):
+    """
+    Po udanym wystawieniu – zapisuje ID/numer FV do rejestru.
+    """
+    nip_i = int(clean_nip(nip))
+    sql = """
+        UPDATE prowizje_fakturownia
+        SET fakturownia_id = %s,
+            fakturownia_nr = %s
+        WHERE nazwa_spolki = %s
+          AND nip = %s
+          AND okres = %s
+    """
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (int(fakturownia_id), fakturownia_nr, company, nip_i, okres))
+        conn.commit()
+
+def filter_new_source_invoices(df: pd.DataFrame, company: str) -> pd.DataFrame:
+    """
+    Zwraca TYLKO faktury z XLSX, których NIE MA w DB.
+    Klucz: (nip, numer_faktury, data_wystawienia) dla danej spółki.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # --- normalizacja wejścia (MUSI być identyczna jak przy zapisie do DB) ---
+    df["NIP"] = df["NIP"].astype(str).map(clean_nip)
+    df["Numer dokumentu"] = df["Numer dokumentu"].astype(str).str.strip()
+
+    # data -> date (bez czasu)
+    df["Data wystawienia"] = pd.to_datetime(df["Data wystawienia"], errors="coerce").dt.date
+
+    # wywal śmieciowe rekordy, które i tak nie powinny iść dalej
+    df = df[df["NIP"].notna() & (df["NIP"] != "") & df["Data wystawienia"].notna()].copy()
+
+    before = len(df)
+    if before == 0:
+        logging.info("[DB-FILTER] wejście=0 (po czyszczeniu)")
+        return df
+
+    sql = """
+        SELECT nip, numer_faktury, data_wystawienia
+        FROM faktury_do_prowizji
+        WHERE nazwa_spolki = %s
+    """
+
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (company,))
+        existing = {
+            (str(nip).strip(), str(nr).strip(), data)
+            for (nip, nr, data) in cur.fetchall()
+        }
+
+    # budujemy klucz po stronie DF i filtrujemy
+    keys = list(zip(df["NIP"].astype(str), df["Numer dokumentu"], df["Data wystawienia"]))
+    mask = [k not in existing for k in keys]
+
+    new_df = df.loc[mask].reset_index(drop=True)
+
+    logging.info(
+        f"[DB-FILTER] wejście={before} | już_w_DB={before - len(new_df)} | nowe={len(new_df)}"
+    )
+    return new_df
+
+def get_addresses_from_db() -> Dict[str, str]:
+    """Zwraca mapę {NIP: adres}."""
+    sql = """
+        SELECT nip, adres
+        FROM merchanci
+        WHERE nip IS NOT NULL AND adres IS NOT NULL
+    """
+
+    result = {}
+
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        for row in cur.fetchall():   # ✅ dict
+            nip = row["nip"]
+            addr = row["adres"]
+            result[str(nip).strip()] = str(addr).strip()
+
+
+    logging.info(f"[DB] Załadowano adresy: {len(result)}")
+    return result
+
+def get_names_from_db_for_nips(nips: list[str | int]) -> dict[str, str]:
+    if not nips:
+        return {}
+
+    nips_int = [int(clean_nip(n)) for n in nips if clean_nip(n)]
+
+    sql = """
+        SELECT nip, nazwa
+        FROM merchanci
+        WHERE nip = ANY(%s::bigint[])
+          AND nazwa IS NOT NULL
+    """
+
+    def _clean(name: str) -> str:
+        t = unicodedata.normalize("NFKC", name)
+        t = re.sub(r'[\-\u2010-\u2015]', ' ', t)
+        return re.sub(r'\s+', ' ', t).strip()
+
+    result = {}
+
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (nips_int,))
+        for nip, name in cur.fetchall():
+            result[str(nip)] = _clean(name)
+
+    logging.info(f"[DB] Nazwy kontrahentów: {len(result)}")
+    return result
+
+# =====================================================
+# FAKTURY ŹRÓDŁOWE (KLUCZOWE)
+# =====================================================
+
+def save_source_invoices(df: pd.DataFrame, company: str) -> tuple[int, int]:
+    """
+    Zapisuje WYŁĄCZNIE faktury źródłowe, które weszły do prowizji (df_new/df_for_reports).
+    Liczy i loguje ile realnie wstawiono oraz ile pominięto (bo konflikt/duplikat).
+    Zwraca: (inserted, skipped)
+    """
+    if df.empty:
+        logging.info("[DB] Brak faktur prowizyjnych do zapisu.")
+        return 0, 0
+
+    required = {"NIP", "Numer dokumentu", "Data wystawienia", "Netto", "VAT", "Brutto"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"[DB] Brakuje kolumn: {', '.join(sorted(missing))}")
+
+    records = []
+    for _, row in df.iterrows():
+        nip = clean_nip(row["NIP"])
+        numer = str(row["Numer dokumentu"]).strip()
+        data = pd.to_datetime(row["Data wystawienia"], errors="coerce")
+
+        if not nip or not numer or pd.isna(data):
+            continue
+
+        records.append((
+            nip,
+            numer,
+            data.date(),
+            norm_amount(row["Netto"]),
+            norm_amount(row["VAT"]),
+            norm_amount(row["Brutto"]),
+            company,
+        ))
+
+    if not records:
+        logging.info("[DB] Po walidacji brak rekordów.")
+        return 0, 0
+
+    sql = """
+        INSERT INTO faktury_do_prowizji (
+            nip, numer_faktury, data_wystawienia,
+            kwota_netto, kwota_vat, kwota_brutto,
+            nazwa_spolki
+        )
+        VALUES %s
+        ON CONFLICT (nip, numer_faktury, data_wystawienia, nazwa_spolki)
+        DO NOTHING
+        RETURNING 1
+    """
+
+    inserted = 0
+    with db_conn() as conn, conn.cursor() as cur:
+        # execute_values robi jeden INSERT na batch i wspiera RETURNING
+        page_size = 500
+        for i in range(0, len(records), page_size):
+            chunk = records[i:i + page_size]
+            execute_values(cur, sql, chunk, page_size=len(chunk))
+            rows = cur.fetchall()  # z RETURNING 1
+            inserted += len(rows)
+
+        conn.commit()
+
+    skipped = len(records) - inserted
+    logging.info(f"[DB] Zapisano faktury źródłowe: {inserted}")
+    logging.info(f"[DB] Pominięto (już w bazie / konflikt): {skipped}")
+
+    return inserted, skipped
+
+def mark_as_used_by_ids(
+        source_ids: list[int],
+        fakturownia_id: int,
+        fakturownia_numer: str | None = None) -> int:
+    if not source_ids:
+        return 0
+
+    sql = """
+        UPDATE faktury_do_prowizji
+        SET id_fakturowni = %s,
+            fakturownia_numer = %s
+        WHERE id_faktury = ANY(%s)
+    """
+
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (int(fakturownia_id), fakturownia_numer, source_ids))
+        updated = cur.rowcount
+        conn.commit()
+
+    logging.info(f"[DB] Oznaczono {updated} faktur (id_fakturowni={fakturownia_id}, nr={fakturownia_numer})")
+    return updated
+
+# =====================================================
+# FAKTUROWNIA API
+# =====================================================
+
+NIP_RE = re.compile(r"\d+")
+
+def _clean_nip_to_int(val) -> int | None:
+    """
+    Zwraca int NIP jeśli da się bezpiecznie wyciągnąć 10 cyfr.
+    W przeciwnym razie None.
+    """
+    if val is None:
+        return None
+
+    s = str(val).strip()
+    if not s:
+        return None
+
+    s = s.replace("PL", "").replace("pl", "").strip()
+    digits = "".join(NIP_RE.findall(s))  # zostaw tylko cyfry
+
+    # typowo NIP ma 10 cyfr (jeśli u Ciebie bywają inne, poluzuj warunek)
+    if len(digits) != 10:
+        return None
+
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+def get_source_ids_for_df(df_new: pd.DataFrame, company: str) -> dict[int, list[int]]:
+    """
+    Zwraca mapę:
+        { nip_int: [id_faktury, ...] }
+    dla faktur źródłowych zapisanych wcześniej do DB.
+    ODPORNA na tuple / dict cursor.
+    """
+
+    if df_new is None or df_new.empty:
+        logging.info("[DB] df_new puste – brak source IDs.")
+        return {}
+
+    nips = (
+        df_new["NIP"]
+        .astype(str)
+        .map(clean_nip)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    if not nips:
+        logging.warning("[DB] Brak poprawnych NIP-ów w df_new.")
+        return {}
+
+    nips_int = [int(n) for n in nips]
+
+    sql = """
+        SELECT id_faktury, nip
+        FROM faktury_do_prowizji
+        WHERE nazwa_spolki = %s
+          AND nip = ANY(%s::bigint[])
+          AND id_fakturowni IS NULL
+          AND nip IS NOT NULL
+    """
+
+    out: dict[int, list[int]] = {}
+
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (company, nips_int))
+        rows = cur.fetchall()
+
+    for row in rows:
+        try:
+            # ✅ obsługa dict (RealDictCursor)
+            if isinstance(row, dict):
+                id_faktury = row.get("id_faktury")
+                nip = row.get("nip")
+            # ✅ obsługa tuple
+            else:
+                id_faktury, nip = row
+
+            if id_faktury is None or nip is None:
+                continue
+
+            nip_int = int(str(nip).strip())
+            out.setdefault(nip_int, []).append(int(id_faktury))
+
+        except Exception:
+            logging.warning(
+                f"[DB] Nieprawidłowy rekord w DB: {row!r}"
+            )
+
+    logging.info(
+        f"[DB] get_source_ids_for_df: {sum(len(v) for v in out.values())} ID faktur"
+    )
+    return out
 
 def get_invoice_details(invoice_id: int) -> dict:
     """Pobiera szczegóły faktury z API Fakturowni."""
@@ -164,227 +391,3 @@ def get_invoice_details(invoice_id: int) -> dict:
     except Exception as e:
         logging.warning(f"[FAKTUROWNIA] Nie udało się pobrać szczegółów faktury {invoice_id}: {e}")
         return {}
-
-# niepotrzeban funkcja
-# def zapisz_faktury_do_prowizji(wyniki, company):
-#     zapisane, pominiete = 0, 0
-#
-#     with db_conn() as conn, conn.cursor() as cur:
-#         for w in wyniki:
-#             if not w.get("ok"):
-#                 continue
-#
-#             try:
-#                 cur.execute("""
-#                     INSERT INTO faktury_do_prowizji (
-#                         id_fakturowni,
-#                         numer_faktury,
-#                         data_wystawienia,
-#                         kwota_netto,
-#                         kwota_vat,
-#                         kwota_brutto,
-#                         nip,
-#                         nazwa_spolki
-#                     )
-#                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-#                     ON CONFLICT (nip, numer_faktury, nazwa_spolki) DO NOTHING;
-#                 """, (
-#                     w.get("id"),
-#                     w.get("number"),
-#                     w.get("issue_date"),
-#                     w.get("netto"),
-#                     w.get("vat"),
-#                     w.get("brutto"),
-#                     str(w.get("nip")).replace("PL","").strip(),
-#                     company
-#                 ))
-#                 zapisane += 1
-#
-#             except Exception as e:
-#                 logging.warning(f"[DB] Pominieto FV {w.get('number')}: {e}")
-#                 pominiete += 1
-#
-#         conn.commit()
-#
-#     logging.info(f"[DB] {zapisane} dodanych, {pominiete} pominiętych.")
-
-# def zapisz_powiazania(df, wyniki):
-#     """
-#     Tworzy powiązania między fakturami źródłowymi (tabela faktury)
-#     a wystawionymi fakturami prowizyjnymi (tabela faktury_do_prowizji).
-#     """
-#
-#     dodane, pominiete = 0, 0
-#
-#     with db_conn() as conn:
-#         with conn.cursor() as cur:
-#             for w in wyniki:
-#                 if not w.get("ok"):
-#                     continue  # pomiń nieudane faktury
-#
-#                 faktura_api_id = w.get("id")
-#                 nip = w.get("nip")
-#
-#                 # 🔍 znajdź lokalne ID faktury prowizyjnej (tej wystawionej przez API)
-#                 cur.execute("""
-#                     SELECT id_faktury_prowizji
-#                     FROM faktury_do_prowizji
-#                     WHERE id_fakturowni = %s;
-#                 """, (faktura_api_id,))
-#                 prow = cur.fetchone()
-#
-#                 if not prow:
-#                     logging.warning(f"[POWIAZANIA] ⚠️ Brak lokalnej faktury prowizyjnej {faktura_api_id}")
-#                     pominiete += 1
-#                     continue
-#
-#                 # obsługa różnych typów zwróconych wyników (tuple lub dict)
-#                 id_faktury_prowizji = (
-#                     prow.get("id_faktury_prowizji") if isinstance(prow, dict) else prow[0]
-#                 )
-#
-#                 # 🔍 wybierz wszystkie faktury źródłowe dla danego NIP z DataFrame
-#                 sub = df[df["NIP"] == nip]
-#
-#                 for _, f in sub.iterrows():
-#                     try:
-#                         numer_dokumentu = str(f.get("Numer dokumentu", "")).strip()
-#                         if not numer_dokumentu:
-#                             continue
-#
-#                         # znajdź fakturę źródłową po numerze
-#                         cur.execute("""
-#                             SELECT id_faktury
-#                             FROM faktury_do_prowizji
-#                             WHERE numer_faktury = %s;
-#                         """, (numer_dokumentu,))
-#                         src = cur.fetchone()
-#                         if not src:
-#                             logging.warning(f"[POWIAZANIA] ⚠️ Nie znaleziono faktury źródłowej '{numer_dokumentu}'")
-#                             pominiete += 1
-#                             continue
-#
-#                         id_faktury_zrodlowej = (
-#                             src.get("id_faktury") if isinstance(src, dict) else src[0]
-#                         )
-#
-#                         # 🧾 wstawienie powiązania
-#                         cur.execute("""
-#                             INSERT INTO powiazania_faktur (id_faktury_prowizji, id_faktury_zrodlowej)
-#                             VALUES (%s, %s)
-#                             ON CONFLICT DO NOTHING;
-#                         """, (id_faktury_prowizji, id_faktury_zrodlowej))
-#                         dodane += 1
-#
-#                     except Exception as e:
-#                         logging.warning(f"[POWIAZANIA] ⚠️ Błąd przy zapisie powiązania: {e}")
-#                         pominiete += 1
-#
-#         conn.commit()
-#
-#     logging.info(f"[POWIAZANIA] ✅ Dodano {dodane} powiązań, pominięto {pominiete}.")
-
-
-# funkcja sprawdza czy w bazie nie ma faktur cząstkowych na bazie któych zostały wystawione faktury
-# 3%
-# def find_duplicate_source_invoices(df, company):
-#     """
-#     Sprawdza duplikaty na poziomie KONKRETNEJ faktury, a nie całego NIP-u.
-#     Duplikatem jest:
-#     - ten sam NIP
-#     - ten sam numer faktury
-#     - te same kwoty (Netto, VAT, Brutto)
-#     - już wcześniej rozliczony w tej samej spółce
-#
-#     Zwraca indeksy do usunięcia z DF oraz info debug.
-#     """
-#     duplikaty_idx = []
-#     checked = 0
-#
-#     with db_conn() as conn, conn.cursor() as cur:
-#         for i, row in df.iterrows():
-#             checked += 1
-#
-#             nip = str(row["NIP"]).strip()
-#             numer = str(row["Numer dokumentu"]).strip()
-#             kw_netto = float(row["Netto"])
-#             kw_vat = float(row["VAT"])
-#             kw_brutto = float(row["Brutto"])
-#
-#             if not nip or not numer:
-#                 continue
-#
-#             cur.execute(
-#                 """
-#                 SELECT 1 FROM faktury_do_prowizji
-#                 WHERE nip = %s
-#                   AND numer_faktury = %s
-#                   AND kwota_netto = %s
-#                   AND kwota_vat = %s
-#                   AND kwota_brutto = %s
-#                   AND nazwa_spolki = %s
-#                 LIMIT 1
-#                 """,
-#                 (nip, numer, kw_netto, kw_vat, kw_brutto, company)
-#             )
-#
-#             if cur.fetchone():
-#                 duplikaty_idx.append(i)
-#
-#     return duplikaty_idx, checked
-
-def get_names_from_db_for_nips(nips: list[str | int]) -> dict[str, str]:
-    """
-    Zwraca mapę {NIP: nazwa} dla podanych NIP-ów z tabeli `merchanci` (nip BIGINT).
-    Czyści nazwę.
-    """
-    nips_bigint: list[int] = []
-    for x in nips:
-        try:
-            s = str(x).strip()
-            if s and s.replace(" ", "").isdigit():
-                nips_bigint.append(int(s))
-        except Exception:
-            continue
-
-    if not nips_bigint:
-        return {}
-
-    sql = """
-        SELECT nip, nazwa
-        FROM merchanci
-        WHERE nip = ANY(%s::bigint[])
-          AND nazwa IS NOT NULL
-    """
-
-    def _clean_name(name: str) -> str:
-        if not name:
-            return ""
-        t = unicodedata.normalize("NFKC", str(name))
-        t = re.sub(r'^[\-\u2010\u2011\u2012\u2013\u2014\u2212\s]*\|+', '', t)
-        t = re.sub(r'[\-\u2010\u2011\u2012\u2013\u2014\u2212]', ' ', t)
-        t = re.sub(r'\s+', ' ', t).strip()
-        t = re.sub(r'\s*\|\s*', '|', t)
-        t = t.strip('|')
-        return t
-
-    result: dict[str, str] = {}
-
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute(sql, (nips_bigint,))
-        rows = cur.fetchall()
-
-        for row in rows:
-            if isinstance(row, dict):
-                nip_val = row.get("nip")
-                name_val = row.get("nazwa")
-            else:
-                nip_val = row[0]
-                name_val = row[1]
-
-            if nip_val:
-                nip_clean = str(nip_val)
-                result[nip_clean] = _clean_name(name_val)
-
-    logging.info(f"[DEBUG] nazwy pobrane z DB: {len(result)} rekordów")
-    return result
