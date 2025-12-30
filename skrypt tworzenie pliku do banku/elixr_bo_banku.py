@@ -1,35 +1,33 @@
 import hashlib
+import io
 import logging
-import math
 import os
 import random
+import re
 import shutil
+import sys
 import time
 from argparse import ArgumentParser, BooleanOptionalAction
-from collections import Counter
 from collections import defaultdict
 from contextlib import contextmanager
+from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Optional, Dict, List
 
+import pandas as pd
 import psycopg2
 import py7zr
+import requests
 import unicodedata
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import RealDictCursor
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-
-import sys
-import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-import io
-import re
-from datetime import datetime
 
 import json
 
@@ -49,8 +47,11 @@ import json
 # ogarnąć formatownaie daty jako nr dokumentu DONE
 
 # TODO 3:
-# zmienić sposób generownaia pliku tj zamienić nazwę kontrahenta z pliku na nazwę z bazy danych
+# zmienić sposób generownaia pliku tj zamienić nazwę kontrahenta z pliku na nazwę z bazy danych DONE
 
+
+# TODO 4:
+# Dla Spółki Action dodać oddzielne nry kont bankowych
 
 #######################
 # INSTRUKCJA OBSLUGI CLI
@@ -126,46 +127,6 @@ OUTPUT_ENCODING = os.getenv("OUTPUT_ENCODING", "iso8859_2").lower()
 # Normalizacja / kodowanie
 # =========================
 
-
-def _yyyymmdd_to_iso(d) -> str:
-    """
-    Przyjmuje YYYYMMDD (str/int) i zwraca YYYY-MM-DD.
-    Zwraca "" gdy brak lub format niepoprawny.
-    """
-    if d is None:
-        return ""
-    if isinstance(d, float) and math.isnan(d):
-        return ""
-    s = str(d).strip()
-    if len(s) == 8 and s.isdigit():
-        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    return ""
-
-def _to_float0(x) -> float:
-    """Float z NaN -> 0.0."""
-    try:
-        v = float(x)
-        if math.isnan(v):
-            return 0.0
-        return v
-    except Exception:
-        return 0.0
-
-def _to_int0(x) -> int:
-    """Int z NaN/None -> 0."""
-    try:
-        if x is None:
-            return 0
-        if isinstance(x, float) and math.isnan(x):
-            return 0
-        return int(x)
-    except Exception:
-        try:
-            # czasem mamy np. '123.0'
-            return int(float(x))
-        except Exception:
-            return 0
-
 def build_json_przelew_company_nip(df: pd.DataFrame,
                                    agg: pd.DataFrame,
                                    company_key: str) -> dict:
@@ -239,7 +200,6 @@ def build_json_przelew_company_nip(df: pd.DataFrame,
 
     return payload
 
-
 def save_grouped_json(df: pd.DataFrame,
                       agg: pd.DataFrame,
                       company_key: str,
@@ -258,21 +218,6 @@ def save_grouped_json(df: pd.DataFrame,
         json.dump(payload, f, ensure_ascii=False, indent=2)
     return str(out_path)
 # --- WALIDACJA DANYCH ---
-
-def fetch_statusy_kontrahentow(nipy: list[str]) -> dict[str, str]:
-    """Pobiera statusy dla wielu NIP-ów w jednym zapytaniu."""
-    nip_nums = [int(nip_digits(n)) for n in nipy if nip_digits(n)]
-    if not nip_nums:
-        return {}
-    placeholders = ",".join(["%s"] * len(nip_nums))
-    query = f"SELECT nip, status FROM Merchanci WHERE nip IN ({placeholders})"
-    result = {}
-    with db_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, tuple(nip_nums))
-            for row in cur.fetchall():
-                result[str(row["nip"])] = row["status"]
-    return result
 
 
 def validate_df(
@@ -426,23 +371,6 @@ def sanitize_text(text: str) -> str:
     # stałe ograniczenie długości
     return t[:32]
 
-def add_days_to_date_str(date_str: str, days: int) -> str:
-    """Dodaje dni do daty (YYYYMMDD) i zwraca (YYYYMMDD)."""
-    dt = datetime.strptime(date_str, "%Y%m%d")
-    candidate = (dt + timedelta(days=days)).date()
-    today = datetime.today().date()
-    return max(candidate, today).strftime("%Y%m%d")
-
-def sanitize_nazwa_folderu(text: str) -> str:
-    """Sanityzacja nazw folderów pod Windows/Unix."""
-    if text is None:
-        return ""
-    text = _elixir_safe_text(text)
-    bad = '*;!+?#",<>:\\/|'
-    cleaned = "".join(c for c in str(text) if c not in bad)
-    return " ".join(cleaned.split())
-
-
 # ===========================================
 # Utils
 # ===========================================
@@ -460,6 +388,7 @@ def convert_dates_to_strings(df, column_name):
 
     df[column_name] = df[column_name].apply(_convert)
     return df
+
 def _slugify_filename(s: str, *, max_len: int = 60) -> str:
     """
     Tworzy bezpieczną nazwę pliku dla Windows/macOS/Linux:
@@ -507,9 +436,6 @@ def _slugify_filename(s: str, *, max_len: int = 60) -> str:
 
     return s
 
-from pathlib import Path
-import pandas as pd
-
 def export_grouped_excels(df: pd.DataFrame, out_dir: str, nazwa_spolki: str) -> dict[str, str]:
     data_folder = datetime.now().strftime("%d-%m-%Y")
     base_path = Path(out_dir) / nazwa_spolki / data_folder
@@ -554,127 +480,19 @@ def _only_digits(s: str) -> str:
     return re.sub(r"\D", "", str(s or "")).strip()
 
 
-def build_full_report(df: pd.DataFrame,
-                      recipients_df: pd.DataFrame,
-                      mail_results: list[dict],
-                      attachments_by_nip: dict[str, str],
-                      output_file: str):
-    """
-    Raport zbiorczy:
-    - 1 wiersz per kontrahent (NIP)
-    - dane: nazwa, nip, email, suma Netto/VAT/Brutto, ilość dokumentów, numery dokumentów, status maila
-    - dodatkowy plik z sumą globalną
-    """
-    df = df.copy()
-    df["NIP_clean"] = df["NIP"].astype(str).map(_only_digits)
+# funkcja zapisująca błedy do plików
+# def export_error_log(error_log: list[dict], out_csv_path: str):
+#     """Pełny log do jednego CSV + osobne pliki per-typ."""
+#     if not error_log:
+#         print("[VALID] Brak błędów – nic nie eksportuję.")
+#         # zamiast return -> pozwól funkcji się zakończyć
+#         return None
+#
+#     df_all = pd.DataFrame(error_log)
+#     os.makedirs(os.path.dirname(out_csv_path) or ".", exist_ok=True)
+#     df_all.to_csv(out_csv_path, index=False, encoding="utf-8-sig")
+#     print(f"[VALID] Pełny log błędów zapisany: {out_csv_path}")
 
-    recipients_df = recipients_df.copy()
-    recipients_df["nip_clean"] = recipients_df["nip"].astype(str).map(_only_digits)
-
-    # agregacja dokumentów per NIP
-    docs_grouped = (
-        df.groupby("NIP_clean")
-        .agg(
-            Netto=("Netto", "sum"),
-            VAT=("VAT", "sum"),
-            Brutto=("Brutto", "sum"),
-            ilosc_dokumentow=("Numer dokumentu", "count"),
-            dokumenty=("Numer dokumentu", lambda x: " | ".join(map(str, x)))
-        )
-        .reset_index()
-        .rename(columns={"NIP_clean": "nip_clean"})  # 🔹 DODAJ TO
-    )
-
-    # mail results -> DF
-    mail_df = pd.DataFrame(mail_results or [])
-    if not mail_df.empty:
-        mail_df.rename(columns={"email": "Email", "ok": "Wyslano_OK"}, inplace=True)
-    else:
-        mail_df = pd.DataFrame(columns=["Email", "Wyslano_OK"])
-
-    # scalanie
-    raport = (
-        recipients_df
-        .merge(docs_grouped, on="nip_clean", how="left")
-        .merge(mail_df[["Email", "Wyslano_OK"]], left_on="email", right_on="Email", how="left")
-    )
-
-    # załączniki
-    att_clean = {_only_digits(k): v for k, v in (attachments_by_nip or {}).items()}
-    raport["attachment_path"] = raport["nip_clean"].map(att_clean).fillna("")
-
-    # zaokrąglenia
-    for c in ["Netto", "VAT", "Brutto"]:
-        raport[c] = pd.to_numeric(raport[c], errors="coerce").fillna(0).round(2)
-    # zapis raportu szczegółowego
-    base, ext = os.path.splitext(output_file)
-    raport_path = f"{base}_full{ext or '.csv'}"
-    raport.to_csv(raport_path, index=False, encoding=OUTPUT_ENCODING, sep=";")
-    logging.info("[SAVE] Raport pełny: %s", raport_path)
-
-    # raport zbiorczy (sumy globalne)
-    summary = {
-        "suma_netto": raport["Netto"].sum(),
-        "suma_vat": raport["VAT"].sum(),
-        "suma_brutto": raport["Brutto"].sum(),
-        "suma_dokumentow": raport["ilosc_dokumentow"].sum(),
-        "ilosc_kontrahentow": raport.shape[0],
-        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    summary_path = f"{base}_summary{ext or '.csv'}"
-    pd.DataFrame([summary]).to_csv(summary_path, index=False, encoding=OUTPUT_ENCODING, sep=";")
-    logging.info("[SAVE] Raport zbiorczy (sumy globalne): %s", summary_path)
-
-    return raport, raport_path, summary_path
-
-
-
-def print_error_summary(error_log: list[dict], *, max_per_type: int = 10):
-    """Krótkie podsumowanie + próbka błędów dla każdego typu."""
-    if not error_log:
-        print("[VALID] Brak błędów ")
-        return
-
-    cnt = Counter(e["type"] for e in error_log)
-    print("[VALID] Szczegóły błędów (liczba wystąpień):")
-    for t, n in cnt.most_common():
-        print(f"  - {t}: {n}")
-
-    # Próbki (żeby nie zalać konsoli)
-    print("\n[VALID] Próbki błędów (po maks. {} na typ):".format(max_per_type))
-    by_type = {}
-    for e in error_log:
-        by_type.setdefault(e["type"], []).append(e)
-
-    for t, rows in by_type.items():
-        sample = rows[:max_per_type]
-        df_err = pd.DataFrame(sample)
-        cols_pref = ["row", "doc", "value", "netto", "vat", "brutto", "diff", "msg"]
-        cols = [c for c in cols_pref if c in df_err.columns]
-        print(f"\n--- {t} (pokazuję {len(sample)} z {len(rows)}) ---")
-        if cols:
-            print(df_err[cols].to_string(index=False))
-        else:
-            print(pd.DataFrame(sample).to_string(index=False))
-
-def export_error_log(error_log: list[dict], out_csv_path: str):
-    """Pełny log do jednego CSV + osobne pliki per-typ."""
-    if not error_log:
-        print("[VALID] Brak błędów – nic nie eksportuję.")
-        # zamiast return -> pozwól funkcji się zakończyć
-        return None
-
-    df_all = pd.DataFrame(error_log)
-    os.makedirs(os.path.dirname(out_csv_path) or ".", exist_ok=True)
-    df_all.to_csv(out_csv_path, index=False, encoding="utf-8-sig")
-    print(f"[VALID] Pełny log błędów zapisany: {out_csv_path}")
-
-    # podział i zapis błędów per-typ
-    # for t, sub in df_all.groupby("type"):
-    #     safe_t = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(t))
-    #     per_type_path = out_csv_path.replace(".csv", f"_{safe_t}.csv")
-    #     sub.to_csv(per_type_path, index=False, encoding="utf-8-sig")
-    #     print(f"[VALID] Log '{t}' zapisany: {per_type_path}")
 
 def nip_digits(nip: str) -> str:
     return re.sub(r"\D", "", str(nip or ""))
@@ -711,17 +529,6 @@ def serializacja_dat(x) -> str:
 
     raise ValueError(f"Nieobsługiwany format daty: {x!r}")
 
-def clean_digits(s: str) -> str:
-    return re.sub(r"\D", "", str(s or ""))
-
-def valid_nip(nip: str) -> bool:
-    nip = clean_digits(nip)
-    if len(nip) != 10 or not nip.isdigit():
-        return False
-    w = [6, 5, 7, 2, 3, 4, 5, 6, 7]
-    checksum = sum(int(nip[i]) * w[i] for i in range(9)) % 11
-    return checksum == int(nip[9])
-
 def normalize_nrb(account: str) -> str:
     """Zwraca 26 cyfr NRB (lub pusty string, gdy format niepoprawny)."""
     if not account:
@@ -739,9 +546,6 @@ def bank_code_from_nrb(nrb: str) -> str:
     if len(nrb) >= 10:
         return nrb[2:10]
     return ""
-
-def is_blank(s: str | None) -> bool:
-    return s is None or str(s).strip() == ""
 
 # =========================
 # DB helpers
@@ -783,52 +587,6 @@ def nipy_db():
             results = cursor.fetchall()
     return results
 
-def clean_invoice_id(s: str) -> str:
-    current_year = datetime.now().year
-    s = re.sub(rf"\b{current_year}\b", "", s)
-
-    # zamienia / na - i czyści spacje wielokrotne
-    s = str(s or "")
-    s = s.replace("/", "-")
-    s = s.replace("\\", "-")
-    s = s.replace("|", "")
-    # usuń godzinę z końca np. "2025-08-02 00:00:00" → "2025-08-02"
-    s = re.sub(r"\s*\d{2}:\d{2}:\d{2}$", "", s)
-
-    # dodatkowo jeśli zostanie sama data z czasem (np. Timestamp), to też skróci
-    s = re.sub(r"(\d{4}-\d{2}-\d{2}).*", r"\1", s)
-
-    # normalizacja spacji
-    s = re.sub(r"\s", " ", s).strip()
-    return s
-
-def bulk_insert_oplacone_faktury(rows: list[tuple]):
-    if not rows:
-        return
-    sql = """
-    INSERT INTO "Oplacone_Faktury" (
-        polecenie_zaplaty,
-        data_platnosci,
-        kwota_platnosci,
-        nr_rozliczeniowy_banku_kontrahenta,
-        tryb_realizacji_platnosci,
-        nr_rachunku_zleceniodawcy,
-        nr_rachunku_kontrahenta,
-        nazwa_i_adres_zleceniodawcy,
-        nazwa_i_adres_kontrahenta,
-        oplaty_i_prowizje,
-        pole_13,
-        pole_14,
-        klasyfikacja_polecenia,
-        informacja_klient_bank,
-        szczegoly_platnosci
-    ) VALUES %s
-    """
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            execute_values(cur, sql, rows)
-        conn.commit()
-
 @contextmanager
 def db_conn():
     conn = psycopg2.connect(**DB_CONFIG)
@@ -849,14 +607,24 @@ def db_execute(query: str, params: tuple):
             cur.execute(query, params)
             conn.commit()
 
-def nr_konta_z_bazy(nip: str):
+def nr_konta_z_bazy(nip: str, company:str):
     nip_num = int(nip_digits(nip))
-    rec = db_fetchone("SELECT nr_konta_sm FROM merchanci WHERE nip = %s", (nip_num,))
-    if rec and rec.get("nr_konta_sm"):
-        return rec["nr_konta_sm"]
-    else:
-        print(f"Brak nr konta w bazie dla NIP: {nip}")
-        return None
+
+    nrykont = {
+        "shumee": "nr_konta_sm",
+        "extrastore":"nr_konta_es",
+        "greatstore":"nr_konta_gs",
+    }
+
+    nr_konta = nrykont.get(company, "nr_konta_sm")
+    query = f"SELECT {nr_konta} from merchanci where nip =%s"
+    rec = db_fetchone(query, (nip_num,))
+    if rec and rec.get(nr_konta):
+        print(rec[nr_konta])
+        return rec[nr_konta]
+
+    print(f"Brak nr konta w bazie dla NIP: {nip} {company}")
+    return None
 
 def zapisz_adres_do_bazy(nip: str, adres: str):
     nip_num = int(nip_digits(nip))
@@ -976,7 +744,6 @@ def Sha512HashNIP(nip: str, data: str, iters: int = 5000) -> str:
     return h
 
 def data_from_db() -> Dict[str, str]:
-
     try:
         print("[DEBUG] Pobieram nipy i nr kont z merchanci:" )
         query = """
@@ -1065,33 +832,6 @@ def apply_mask(nr_konta: str, maska: str) -> str:
             result.append(m)
     return "".join(result)
 
-
-def porownaj_nipy(file_path: str):
-    nipy_excel = load_nipy_z_excela(file_path)
-
-    print("[DB] nipy z bazy danych :")
-    print(nipy_db)
-
-    wspolne = nipy_excel & nipy_db
-    tylko_w_excelu = nipy_excel - nipy_db
-    tylko_w_bazie = nipy_db - nipy_excel
-
-    if tylko_w_excelu:
-        print("\nNIP-y z Excela, których brak w bazie:")
-        for nip in sorted(tylko_w_excelu):
-            print("  -", nip)
-
-    if tylko_w_bazie:
-        print("\nNIP-y z bazy, których brak w Excelu:")
-        for nip in sorted(tylko_w_bazie):
-            print("  -", nip)
-
-    return {
-        "wspolne": wspolne,
-        "tylko_w_excelu": tylko_w_excelu,
-        "tylko_w_bazie": tylko_w_bazie,
-    }
-
 def sprawdz_excelowe_kontrahenty(json_file: str, excel_file: str):
     """Sprawdza NIP-y z Excela i bazy w pliku płaskim MF"""
     baza_danych = data_from_db()
@@ -1148,7 +888,6 @@ def sprawdz_excelowe_kontrahenty(json_file: str, excel_file: str):
     print(f"[WL] Sprawdzono kontrahentów: brak wpisu w pliku MF dla {len(brakujace)} pozycji.")
     return brakujace
 
-#dodać zapis nazwy spolki do bazy danych
 def zapisz_faktury_do_bazy(df_to_db: pd.DataFrame, spolka: str) -> None:
     """
     Zapisuje faktury do tabeli 'faktury'.
@@ -1172,10 +911,7 @@ def zapisz_faktury_do_bazy(df_to_db: pd.DataFrame, spolka: str) -> None:
         return
 
     df_to_db = df_to_db.copy()
-
-    # czysty NIP
     df_to_db["__nip_clean"] = df_to_db["NIP"].astype(str).str.replace(r"\D", "", regex=True)
-
 
     missing = required - set(df_to_db.columns)
     if missing:
@@ -1216,7 +952,7 @@ def zapisz_faktury_do_bazy(df_to_db: pd.DataFrame, spolka: str) -> None:
                 continue
             data_wystawienia = data_wystawienia.date()
 
-            # kwoty (df ma grosze, my zapisujemy zł)
+            # kwoty zamieniane z gorszy na złotówki(dataframe w groszach)
             kw_netto  = (Decimal(row["__netto_gr"])  / 100).quantize(Decimal("0.01"))
             kw_vat    = (Decimal(row["__vat_gr"])    / 100).quantize(Decimal("0.01"))
             kw_brutto = (Decimal(row["__brutto_gr"]) / 100).quantize(Decimal("0.01"))
@@ -1285,7 +1021,6 @@ def zapisz_faktury_do_bazy(df_to_db: pd.DataFrame, spolka: str) -> None:
 
 def losowe_opoznienie(min_sec=0.05, max_sec=0.25):
     time.sleep(random.uniform(min_sec, max_sec))
-
 
 # ============================================
 # SCRAPER REGON (Selenium + BS4 + HTML do pamięci)
@@ -1357,28 +1092,6 @@ class RegonScraper:
         cells = rows[0].find_elements(By.TAG_NAME, "td")
         return [c.text.strip() for c in cells]
 
-
-# ============================================
-# FILTRACJA WYNIKÓW SCRAPERA
-# ============================================
-
-def filter_wynik(wynik: list[str]) -> list[str]:
-    """Usuwa zbędne indeksy + ostatni element jeśli to ----------"""
-
-    if not wynik:
-        return []
-
-    # usuń określone pola
-    to_remove = {1, 2, 3, 5}
-    wynik = [v for i, v in enumerate(wynik) if i not in to_remove]
-
-    # usuń ostatni element jeśli to same kreski
-    if wynik and wynik[-1].strip("-").strip() == "":
-        wynik = wynik[:-1]
-
-    return wynik
-
-
 # ============================================
 # WYCIĄGANIE ADRESU
 # ============================================
@@ -1404,7 +1117,6 @@ def wyciagnij_adres_z_komorek(cells: list[str]) -> str:
         return sanitize_text(s)[:35]
 
     return "|".join(clip35(x) for x in frag if x)
-
 
 # =====================================================
 #  GET-OR-FETCH (DB → scrape → DB)
@@ -1448,10 +1160,11 @@ def get_or_fetch_adres(nip_clean: str, scraper: RegonScraper) -> str:
         print(f"[W] Błąd scrapera REGON: {e}")
         return ""
 
-def get_or_fetch_konto(nip_clean: str) -> str:
+def get_or_fetch_konto(nip_clean: str, company:str) -> str:
     try:
-        raw = nr_konta_z_bazy(nip_clean) or ""
+        raw = nr_konta_z_bazy(nip_clean,company) or ""
         nrb = normalize_nrb(raw)
+        print(f"Nr banku dla {nip_clean} : {nrb}")
         return nrb
     except Exception as e:
         print(f"[W] Błąd DB przy pobieraniu konta dla NIP {nip_clean}: {e}")
@@ -1578,17 +1291,9 @@ def export_duplicates_report(df: pd.DataFrame, out_path: str):
     full_dups[cols].to_csv(out_path, index=False, encoding="utf-8")
     print(f"[DUP] Raport duplikatów zapisany: {out_path}")
 
-#Używane do grupowania(agregacji) przelewów
-def _group_key(row) -> str:
-    """NIP (10 cyfr) albo fallback na nazwę kontrahenta."""
-    nipc = nip_digits(row.get("NIP", ""))
-    if len(nipc) == 10 and nipc.isdigit():
-        return nipc
-    name = str(row.get("Kontrahent", "")).strip().upper()
-    return f"NAME::{name}"
-
 #######################################
-# Normalizacja dat do wysyłki przelewów
+# Ładowanie listy świąt wolnych od pracy
+# ze strony NBP
 #######################################
 
 def load_holidays_or_exit() -> set:
@@ -1659,7 +1364,7 @@ def load_holidays_or_exit() -> set:
 try:
     HOLIDAYS = load_holidays_or_exit()
 except SystemExit:
-    raise  # kończy program jeśli nie da się połączyć z NBP
+    raise
 
 
 def get_previous_workday(date: datetime) -> datetime.date:
@@ -1705,40 +1410,6 @@ def gr_to_pln_comma(v_gr: int) -> str:
 # statusy płątników vat
 ACTIVE_STATUSES = {"Czynny", "ACTIVE", "czynny"}
 
-def _wl_status_ok(s: str | None) -> bool:
-    return (s or "").strip() in ACTIVE_STATUSES
-
-def wrap_szczegoly(segments: list[str], max_len: int = 35, max_parts: int = 4) -> str:
-    """
-    Łączy segmenty typu ["/VAT/123", "/IDC/...", "/INV/..."] w string zgodny z ELIXIR:
-    - każdy fragment max 35 znaków
-    - max 4 fragmenty (łącznie 140 znaków)
-    - separator '|' tylko między fragmentami
-    """
-    parts: list[str] = []
-    current = ""
-
-    for seg in segments:
-        # jeśli segment za długi sam w sobie, ucinamy
-        seg = seg[:max_len]
-
-        # sprawdzamy czy mieści się do obecnego fragmentu
-        if len(current) + len(seg) <= max_len:
-            current += seg
-        else:
-            # zamknij obecny i rozpocznij nowy
-            if current:
-                parts.append(current)
-            current = seg
-
-    if current:
-        parts.append(current)
-
-    # max 4 części
-    parts = parts[:max_parts]
-    return "|".join(parts)
-
-
 def przetworz_plik_xlsx(
     input_file: str,
     *,
@@ -1750,7 +1421,7 @@ def przetworz_plik_xlsx(
     per_group_dir: Optional[str] = None,
     save_db: bool = False,
 ):
-    # --- walidacja spółki / nadawcy ---
+    # Część walidacyjno - sprawdzająca
     key = company.strip().lower()
     if key not in COMPANIES:
         raise ValueError(f"Nieznana firma: {company}. Dozwolone: {', '.join(sorted(COMPANIES))}")
@@ -1820,7 +1491,7 @@ def przetworz_plik_xlsx(
         tol=0.01,
         on_error="keep",
     )
-    export_error_log(error_log, os.path.join(OUTPUT_DIR, f"errors_{ts}.csv"))
+    #export_error_log(error_log, os.path.join(OUTPUT_DIR, f"errors_{ts}.csv"))
 
     # --- ujemne kwoty do raportu i outputu ---
     mask_negative = (df["Netto"] <= 0) | (df["VAT"] <= 0) | (df["Brutto"] <= 0)
@@ -1977,7 +1648,7 @@ def przetworz_plik_xlsx(
     # konto per NIP z DB; brak => "000...0"
     nip_to_nrb: dict[str, str] = {}
     for nip in valid_nips:
-        raw = get_or_fetch_konto(nip) or ""
+        raw = get_or_fetch_konto(nip, company) or ""
         nrb = normalize_nrb(raw)
         nip_to_nrb[nip] = nrb if nrb else "0" * 26
 
