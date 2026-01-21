@@ -7,7 +7,7 @@ from typing import Dict
 
 import pandas as pd
 import unicodedata
-from fastapi import requests
+import requests
 from psycopg2.extras import execute_values
 
 from utils import clean_nip, db_conn

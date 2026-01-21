@@ -1,26 +1,25 @@
 from utils import _slugify_filename
+from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
+import os
+import logging
+import pandas as pd
 
 
 def export_grouped_excels(
     df,
     spolka,
-    data_wystawienia=None,
     out_root="raporty_xlsx",
     out_ready_root="raporty_gotowe",
 ):
-    from datetime import date
-    from decimal import Decimal, ROUND_HALF_UP
-    import os
-    import logging
-    import pandas as pd
 
-    if not data_wystawienia:
-        data_wystawienia = date.today().isoformat()
+    # if not data_wystawienia:
+    data_wystawienia = date.today().isoformat()
 
     spolka = spolka.lower()
 
     # ===============================
-    # 📁 KATALOGI WYJŚCIOWE
+    # FOLDERY WYJŚCIOWE
     # ===============================
     out_dir = os.path.join(out_root, spolka, data_wystawienia)
     ready_dir = os.path.join(out_ready_root, spolka, data_wystawienia)
@@ -45,15 +44,15 @@ def export_grouped_excels(
     results = {}
 
     # ===============================
-    # 📊 RAPORT ZBIORCZY (1 ARKUSZ)
+    # RAPORT ZBIORCZY (1 ARKUSZ)
     # ===============================
     summary_writer_path = os.path.join(out_dir, "raport_zbiorczy.xlsx")
     writer = pd.ExcelWriter(summary_writer_path, engine="openpyxl")
 
-    summary_frames = []  # 👈 TU ZBIERAMY WSZYSTKIE POZYCJE
+    summary_frames = []  # TU ZBIERAMY WSZYSTKIE POZYCJE
 
     # ===============================
-    # 🔁 GRUPOWANIE PO NIP
+    # GRUPOWANIE PO NIP
     # ===============================
     for nip, sub in df.groupby("NIP"):
         nip_str = str(nip).strip() or "BRAK_NIP"
@@ -63,7 +62,7 @@ def export_grouped_excels(
         sub = sub.copy()
 
         # ===============================
-        # 💰 LICZENIE PROWIZJI (DECIMAL)
+        # LICZENIE PROWIZJI DECIMAL
         # ===============================
         sub["Netto_dec"] = sub["Netto"].apply(lambda x: Decimal(str(x)))
 
@@ -71,6 +70,17 @@ def export_grouped_excels(
         suma_globalna_dec = (suma_netto_dec * Decimal("0.03")).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
+
+        # DEBUG dla nip 5261032852 FAKTUR
+        # print("[DEBUG] faktury dla nipu: 5261032852")
+        # print("Liczba wszystkich wierszy:", len(df))
+        # print(
+        #     df["NIP"]
+        #     .value_counts()
+        #     .get("5261032852", 0)
+        # )
+        #
+        # print(f"Suma dla {nip_str} wynosi {suma_netto_dec}")
 
         if suma_globalna_dec < Decimal("0.00"):
             logging.warning(
@@ -92,7 +102,7 @@ def export_grouped_excels(
         sub.drop(columns=["Netto_dec"], inplace=True)
 
         # ===============================
-        # 📄 RAPORT INDYWIDUALNY
+        # RAPORTY INDYWIDUALNE
         # ===============================
         summary = pd.DataFrame([{
             "Kontrahent": kontrahent,
@@ -134,7 +144,7 @@ def export_grouped_excels(
         }
 
         # ===============================
-        # ➕ DODANIE DO RAPORTU ZBIORCZEGO
+        # DODANIE DO RAPORTU ZBIORCZEGO
         # ===============================
         summary_frames.append(
             sub[[
@@ -150,7 +160,7 @@ def export_grouped_excels(
         )
 
     # ===============================
-    # 📊 ZAPIS RAPORTU ZBIORCZEGO
+    # ZAPIS RAPORTU ZBIORCZEGO
     # ===============================
     if summary_frames:
         df_summary = pd.concat(summary_frames, ignore_index=True)

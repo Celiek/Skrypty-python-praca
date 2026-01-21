@@ -56,7 +56,7 @@ DEPARTMENT_ID = {
 SPECIAL_2PROC = {"6020134043"}  # 2%
 
 COMPANY_SUFFIX = {
-    "shumee": ("/SM", "/TSM3"),
+    "shumee": ("/SM",),
     "greatstore": ("/GS",),
     "extrastore": ("/EX",),
     "tsm3": ("/TSM3",),
@@ -246,7 +246,7 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     # =====================================================
-    # 4️⃣ FILTR DB (ANTI-JOIN)
+    # FILTR DB (ANTI-JOIN)
     # =====================================================
     df_new = filter_new_source_invoices(df_for_reports, company)
 
@@ -275,13 +275,12 @@ if __name__ == "__main__":
 
     # =====================================================
     # 6️⃣ RAPORTY
-    # =====================================================
+    # ====================================================
     export_grouped_excels(
-        df_new,
+        df = df_new,
         spolka=company,
         out_root="raporty_xlsx"
     )
-
     if args.report_only:
         logging.info("[REPORT-ONLY] Zakończono na etapie raportów.")
         raise SystemExit(0)
@@ -295,7 +294,7 @@ if __name__ == "__main__":
         logging.info("[INFO] Pominięto zapis do DB.")
 
     # =====================================================
-    # 8️⃣ FAKTUROWNIA + UPDATE DB
+    # 8️ FAKTUROWNIA + UPDATE DB
     # =====================================================
     if args.wystaw:
         if args.dry_run:
@@ -316,7 +315,6 @@ if __name__ == "__main__":
                 issue_date
             )
 
-            # 🔴 DOPIERO TERAZ POBIERAMY SOURCE IDS
             source_ids_by_nip = get_source_ids_for_df(df_new, company)
 
             for w in wyniki:
@@ -334,7 +332,7 @@ if __name__ == "__main__":
                 mark_as_used_by_ids(ids, fid, fakturownia_numer=fno)
 
     # =====================================================
-    # 9️⃣ ARCHIWUM PDF
+    # 9 ARCHIWUM PDF
     # =====================================================
     if args.save_invoices:
         suffix = COMPANY_SUFFIX.get(company)

@@ -65,9 +65,10 @@ def clean_adres(adres: str) -> str:
 def losowe_opoznienie(min_sec: float, max_sec: float):
     time.sleep(random.uniform(min_sec, max_sec))
 
+# merchanci z krótką nazwą:
 def pobierz_dane(conn):
     return pd.read_sql(
-        "SELECT id, nip FROM merchanci WHERE adres IS NULL",
+        "select * from merchanci where LENGTH(adres) < 35;",
         conn
     )
 

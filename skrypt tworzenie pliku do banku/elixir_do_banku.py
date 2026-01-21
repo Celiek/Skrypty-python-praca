@@ -15,6 +15,7 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Optional, Dict, List
+from selenium.common.exceptions import WebDriverException
 
 import pandas as pd
 import psycopg2
@@ -46,12 +47,12 @@ import json
 # dodać generowanie raportów ( do wysyłki emailem do kontrahenta) 1/2 DONE
 # ogarnąć formatownaie daty jako nr dokumentu DONE
 
-# TODO 3:
+# TODO 3
 # zmienić sposób generownaia pliku tj zamienić nazwę kontrahenta z pliku na nazwę z bazy danych DONE
 
 
 # TODO 4:
-# Dla Spółki Action dodać oddzielne nry kont bankowych
+# Dla Spółki Action dodać oddzielne nry kont bankowych DONE
 
 #######################
 # INSTRUKCJA OBSLUGI CLI
@@ -217,9 +218,8 @@ def save_grouped_json(df: pd.DataFrame,
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     return str(out_path)
+
 # --- WALIDACJA DANYCH ---
-
-
 def validate_df(
     df: pd.DataFrame,
     *,
@@ -375,6 +375,16 @@ def sanitize_text(text: str) -> str:
 # Utils
 # ===========================================
 
+# Bezpieczna serializacja "Data wpływu" -> YYYYMMDD
+def _safe_yyyymmdd(val):
+    try:
+        return serializacja_dat(val)
+    except Exception:
+        return None
+
+def _ddmmyy(s: str) -> str:
+    return datetime.strptime(s, "%Y%m%d").strftime("%d%m%y")
+
 def convert_dates_to_strings(df, column_name):
     """Zamienia tylko wartości typu datetime na stringi w formacie DD/MM/YYYY"""
     if column_name not in df.columns:
@@ -473,7 +483,7 @@ def export_grouped_excels(df: pd.DataFrame, out_dir: str, nazwa_spolki: str) -> 
         sub[cols].to_excel(fpath, index=False)
         out_map[nip_str] = str(fpath.resolve())
 
-    print(f"[RAPORTY] zapisano raporty w pliku")
+    print("[RAPORTY] zapisano raporty w pliku")
     return out_map
 
 def _only_digits(s: str) -> str:
@@ -608,24 +618,23 @@ def db_execute(query: str, params: tuple):
             conn.commit()
 
 def nr_konta_z_bazy(nip: str, company:str):
+    nip_num = int(nip_digits(nip))
 
-    if nip == "5271107221" and company =="shumee":
-        rec = db_fetchone("SELECT nr_konta_sm FROM merchanci where nip = %s",(nip,))
-        print(f"[DEBUG] {rec}")
-        return rec["nr_konta_sm"]
-    elif nip == "5271107221" and company =="greatstore":
-        rec = db_fetchone("SELECT nr_konta_gs from merchanci where nip = %s",(nip,))
-        print(f"[DEBUG] {rec}")
-        return rec["nr_konta_gs"]
-    elif nip == "5271107221" and company == "extrastore":
-        rec = db_fetchone("SELECT nr_konta_ex FROM merchanci WHERE nip = %s",(nip,))
-        return rec["nr_konta_es"]
-    else:
-        rec = db_fetchone("SELECT nr_konta_sm FROM merchanci WHERE nip = %s", (nip,))
-        if rec and rec.get("nr_konta_sm"):
-            return rec["nr_konta_sm"]
-        else: print(f"Brak nr konta w bazie dla NIP: {nip}")
-    return rec
+    nrykont = {
+        "shumee": "nr_konta_sm",
+        "extrastore":"nr_konta_es",
+        "greatstore":"nr_konta_gs",
+    }
+
+    nr_konta = nrykont.get(company, "nr_konta_sm")
+    query = f"SELECT {nr_konta} from merchanci where nip =%s"
+    rec = db_fetchone(query, (nip_num,))
+    if rec and rec.get(nr_konta):
+        print(rec[nr_konta])
+        return rec[nr_konta]
+
+    print(f"Brak nr konta w bazie dla NIP: {nip} {company}")
+    return None
 
 def zapisz_adres_do_bazy(nip: str, adres: str):
     nip_num = int(nip_digits(nip))
@@ -1165,7 +1174,7 @@ def get_or_fetch_konto(nip_clean: str, company:str) -> str:
     try:
         raw = nr_konta_z_bazy(nip_clean,company) or ""
         nrb = normalize_nrb(raw)
-        #print(f"Nr banku dla {nip_clean} : {nrb}")
+        print(f"Nr banku dla {nip_clean} : {nrb}")
         return nrb
     except Exception as e:
         print(f"[W] Błąd DB przy pobieraniu konta dla NIP {nip_clean}: {e}")
@@ -1411,6 +1420,276 @@ def gr_to_pln_comma(v_gr: int) -> str:
 # statusy płątników vat
 ACTIVE_STATUSES = {"Czynny", "ACTIVE", "czynny"}
 
+# Część walidacyjno - sprawdzająca
+def validate_args(company: str, df: pd.DataFrame) -> None:
+    key = company.strip().lower()
+
+    if key not in COMPANIES:
+        raise ValueError(
+            f"Nieznana firma: {company}. Dozwolone: {', '.join(sorted(COMPANIES))}"
+        )
+
+    wymagane = {
+        "Numer dokumentu", "Kontrahent", "NIP",
+        "Data wpływu", "Brutto", "Netto", "VAT", "Data wystawienia"
+    }
+
+    brak = wymagane - set(df.columns)
+    if brak:
+        raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
+
+    forbidden_names = COMPANIES[key].get("forbidden_name", [])
+    forbidden_nips = COMPANIES[key].get("forbidden_nip", [])
+
+    if forbidden_names:
+        mask = df["Kontrahent"].isin(forbidden_names)
+        if mask.any():
+            print("[WARN] ZAKAZANI KONTRAHENCI:")
+            print(df.loc[mask, ["Kontrahent"]])
+
+    if forbidden_nips:
+        mask = df["NIP"].isin(forbidden_nips)
+        if mask.any():
+            print("[WARN] ZAKAZANE NIPY:")
+            print(df.loc[mask, ["NIP"]])
+
+# Ładowanie ustawień firmowych
+def load_company_config(company:str) -> dict:
+    key = company.strip().lower()
+    return COMPANIES[key]
+
+def make_timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# Srawdzanie danych z pliku i bazy danych na biąłej liście podatników VAT
+# nry-kont -> baza danych, nipy-> plik xlsx
+def run_WL_check(input_file:str) -> None:
+    try:
+        json_path = unzip()
+        sprawdz_excelowe_kontrahenty(json_path,input_file)
+    except Exception as e:
+        print(f"[WL] ⚠️ Błąd podczas sprawdzania kontrahentów: {e}")
+
+def save_skipped_paid_invoices(
+    df: pd.DataFrame,
+    mask_paid: pd.Series,
+    *,
+    company_key: str,
+    ts: str,
+    output_dir: str = OUTPUT_DIR,
+) -> None:
+    """
+    Zapisuje do CSV faktury pominięte, bo już opłacone.
+    """
+    num_paid = int(mask_paid.sum())
+    if not num_paid:
+        return
+
+    skipped_path = os.path.join(
+        output_dir,
+        f"pominiete_oplacone_{company_key}_{ts}.csv"
+    )
+
+    df.loc[mask_paid, ["Numer dokumentu", "NIP", "Kontrahent", "Brutto"]].to_csv(
+        skipped_path,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    print(
+        f"[DB] Pominięto {num_paid} wierszy – "
+        f"faktury już opłacone (log: {skipped_path})"
+    )
+
+
+# Wczytywanie danych z excella
+# i usuwanie duplikatów
+def load_and_prepare_df(path: str, duplicates_action: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    return handle_duplicates(df, action=duplicates_action)
+
+# usuń faktury opłacone ze zbioru danych
+def drop_paid_invoices(
+    df: pd.DataFrame,
+    *,
+    company_key: str,
+    ts: str,
+) -> pd.DataFrame:
+    paid_keys = get_paid_invoice_keys()
+
+    def is_paid(row) -> bool:
+        nip = row["__nip_clean"]
+        return (
+            isinstance(nip, str)
+            and len(nip) == 10
+            and nip.isdigit()
+            and (nip, row["__doc_no_norm"]) in paid_keys
+        )
+
+    mask_paid = df.apply(is_paid, axis=1)
+
+    save_skipped_paid_invoices(
+        df,
+        mask_paid,
+        company_key=company_key,
+        ts=ts,
+    )
+
+    return df.loc[~mask_paid].copy()
+
+
+def validate_invoice_df(df:pd.DataFrame):
+    return validate_df(
+        df,
+        date_col="Data wystawienia",
+        netto_col = "Netto",
+        vat_col = "VAT",
+        brutto_col="Brutto",
+        tol = 0.01,
+        on_error = "keep"
+    )
+
+# zamiana wartości w
+def enrich_df_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["__vat_gr"] = df["VAT"].apply(money_to_grosze)
+    df["__netto_gr"] = df["Netto"].apply(money_to_grosze)
+    df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
+    df["__data_str"] = df["Data wystawienia"].apply(serializacja_dat)
+    df["__nip_clean"] = df["NIP"].astype(str).str.replace(r"\D", "", regex=True)
+    df["__doc_no_norm"] = df["Numer dokumentu"].map(_norm_doc_no)
+    return df
+
+def _is_paid(row: pd.Series, paid_keys: set[tuple[str, str]]) -> bool:
+    """
+    Sprawdza, czy faktura (wiersz DataFrame) jest już opłacona.
+
+    paid_keys: set[(nip_clean, doc_no_norm)]
+    """
+    nip = row.get("__nip_clean")
+    doc_no = row.get("__doc_no_norm")
+
+    if not isinstance(nip, str):
+        return False
+
+    if len(nip) != 10 or not nip.isdigit():
+        return False
+
+    if not doc_no:
+        return False
+
+    return (nip, doc_no) in paid_keys
+
+# agregowanie przelewów po kluczu grupowania:
+# klucz grupowania: NIP(10) albo fallback NAME::
+def aggregate_invoices(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df = df.copy()
+    df["__grp_key"] = df.apply(
+        lambda r: r["__nip_clean"]
+        if len(r["__nip_clean"]) == 10
+        else f"NAME::{r['Kontrahent']}",
+        axis=1
+    )
+
+    # --- agregacja: kontrahent/dzień (data wpływu) ---
+    df_day = df.loc[df["__data_str"].notna()].copy()
+
+    agg = (
+        df_day.groupby(["__grp_key", "__data_str"], as_index=False)
+        .agg(
+            nip_clean=("__nip_clean", "first"),
+            kontrahent=("Kontrahent", "first"),
+            first_doc=("Numer dokumentu", "first"),
+            suma_brutto=("Brutto", "sum"),
+            suma_vat=("VAT", "sum"),
+            suma_netto=("Netto", "sum"),
+            cnt_docs=("Numer dokumentu", "nunique"),
+            cnt_rows=("Brutto", "size"),
+        )
+    )
+
+    # # kwoty w groszach po sumowaniu w PLN
+    # agg["suma_brutto_gr"] = agg["suma_brutto"].apply(money_to_grosze)
+    # agg["suma_vat_gr"] = agg["suma_vat"].apply(money_to_grosze)
+    # agg["suma_netto_gr"] = agg["suma_netto"].apply(money_to_grosze)
+    #
+    # # daty do pliku bankowego
+    # def _safe_ddmmyy(s: str) -> str:
+    #     return datetime.strptime(s, "%Y%m%d").strftime("%d%m%y")
+    #
+    # agg["data_platnosci"] = agg["__data_str"].apply(lambda s: _safe_add30(s, s))  # +30 dni
+    # agg["data_wplywu_ddmmyy"] = agg["__data_str"].apply(_safe_ddmmyy)
+
+    return df_day, agg
+
+def build_merged_report(df: pd.DataFrame, out_csv: str) -> None:
+    df_rep = df.copy()
+    df_rep["__wplyw_str"] = df_rep["Data wystawienia"].map(_safe_yyyymmdd)
+    df_rep["__nip_clean"] = df_rep["NIP"].astype(str).str.replace(r"\D", "", regex=True)
+    df_rep = df_rep.loc[df_rep["__wplyw_str"].notna()]
+
+    raport = (
+        df_rep.groupby(["__wplyw_str", "__nip_clean", "Kontrahent"], as_index=False)
+        .agg(Suma_Brutto_gr=("__brutto_gr", "sum"))
+    )
+
+    raport["Kwota Brutto"] = (raport["Suma_Brutto_gr"] / 100).round(2)
+    raport["Data wystawienia"] = pd.to_datetime(
+        raport["__wplyw_str"], format="%Y%m%d"
+    ).dt.strftime("%Y-%m-%d")
+
+    raport = raport[["Data wystawienia", "__nip_clean", "Kontrahent", "Kwota Brutto"]]
+    raport.rename(columns={"__nip_clean": "NIP"}, inplace=True)
+
+    raport.to_csv(out_csv, index=False, encoding="utf-8-sig")
+
+def prefetch_nip_to_nrb(agg: pd.DataFrame, company: str) -> dict[str,str]:
+    valid_nips= {
+        str(n) for n in agg["nip_clean"].astype(str)
+        if n.isdigit() and len(str(n)) == 10
+    }
+
+    nip_to_nrb= dict[str,str] ={}
+
+    for nip in valid_nips:
+        raw = get_or_fetch_konto(nip,company)
+        if not raw:
+            logging.warning(
+                "[NRB] Brak numeru konta w bazie danych dla NIP=%s",
+                nip,
+                company,
+            )
+        nrb = normalize_nrb(raw)
+        if not nrb:
+            logging.warning(
+                "[NRB] Braku numeru konta w bazie danych dla NIP=%s",
+            )
+        nip_to_nrb[nip] = nrb if nrb else "0"*26
+    return nip_to_nrb
+
+# DO DOKOŃCZENIA
+def build_single_payment(row,nip_to_nrb,adres_cache, conf, scraper):
+    nip =
+
+    return line,day_key
+
+def build_elixir_lines(agg: pd.Dataframe,
+                       nip_to_nrb: dict[str,str],
+                       *,
+                       conf: dict,
+                       headless: bool,
+                       ) -> dict[str, list[str]]:
+    lines_by_day: dict[str,list[str]] = defaultdict(list)
+    adres_cache: dict[str,str] = {}
+
+    try:
+        with RegonScraper(CHROMEDRIVER_PATH, headless=headless) as scraper:
+            for _, row in agg.iterrows():
+                line, day_key = build_single_payment(
+                    row, nip_to_nrb, adres_cache, conf, scraper
+                )
+                lines_by_day[day_key].append(line)
+
 def przetworz_plik_xlsx(
     input_file: str,
     *,
@@ -1419,199 +1698,68 @@ def przetworz_plik_xlsx(
     duplicates_action: str = "warn",
     headless: bool = True,
     merged_csv: Optional[str] = None,
-    per_group_dir: Optional[str] = None,
     save_db: bool = False,
 ):
-    # Część walidacyjno - sprawdzająca
     key = company.strip().lower()
-    if key not in COMPANIES:
-        raise ValueError(f"Nieznana firma: {company}. Dozwolone: {', '.join(sorted(COMPANIES))}")
+    conf = load_company_config(company)
+    ts = make_timestamp()
 
-    # --- Integracja z Białą Listą MF ---
-    try:
-        print("[WL] Pobieram i sprawdzam plik płaski MF...")
-        json_path = unzip()
-        sprawdz_excelowe_kontrahenty(json_path, input_file)
-    except Exception as e:
-        print(f"[WL] ⚠️ Błąd podczas sprawdzania kontrahentów: {e}")
+    run_WL_check(input_file)
 
-    conf = COMPANIES[key]
     nazwa_i_adres_zleceniodawcy = conf["name_addr"]
     nr_rozliczeniowy_zleceniodawcy = conf["bank_code"]  # 8 cyfr
     rachunek_zleceniodawcy = conf["nrb"]                # 26 cyfr
     tryb_realizacji = "0"
     klasyfikacja = "53"
 
-    # sanity check nadawcy
-    if len(re.sub(r"\D", "", rachunek_zleceniodawcy)) != 26:
-        raise ValueError(f"NRB nadawcy ma niepoprawną długość (26 cyfr): {rachunek_zleceniodawcy}")
-    if not re.fullmatch(r"\d{8}", nr_rozliczeniowy_zleceniodawcy):
-        raise ValueError(f"Kod rozliczeniowy nadawcy musi mieć 8 cyfr: {nr_rozliczeniowy_zleceniodawcy}")
+    df = load_and_prepare_df(input_file, duplicates_action)
+    validate_args(company, df)
+    df, error_log = validate_invoice_df(df)
+    df = enrich_df_columns(df)
+    df = drop_paid_invoices(
+        df,
+        company_key=key,
+        ts=ts,
+    )
+    if df.empty:
+        print("[ELIXIR] Wszystkie faktury są już opłacone.")
+        return
 
     # --- ścieżki / timestamp ---
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_path is None:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        output_path = os.path.join(OUTPUT_DIR, f"{key}_przelewy_{ts}.txt")
+        output_path = os.path.join(OUTPUT_DIR, f"{conf}_przelewy_{ts}.txt")
 
-    # --- wczytanie + duplikaty ---
-    df = pd.read_excel(input_file)
-    df = handle_duplicates(df, action=duplicates_action)
-    export_duplicates_report(df, os.path.join(OUTPUT_DIR, f"duplikaty_{ts}.csv"))
-
-    # --- weryfikacja kolumn ---
-    wymagane = {"Numer dokumentu", "Kontrahent", "NIP", "Data wpływu", "Brutto", "Netto", "VAT","Data wystawienia"}
-    brak = wymagane - set(df.columns)
-    if brak:
-        raise ValueError(f"Brak kolumn w pliku: {', '.join(sorted(brak))}")
-
-    # --- wyszukiwanie zakazanych kontrahentów ---
-    forbidden_name_list = COMPANIES[key]["forbidden_name"]
-    forbidden_nip_list = COMPANIES[key]["forbidden_nip"]
-
-    # Sprawdzenie czy da się pobrać dni wolne od pracy ze strony głównej NBP
-    HOLIDAYS = load_holidays_or_exit()
-
-
-    mask = df["Kontrahent"].isin(forbidden_name_list)
-    maska_nip = df["NIP"].isin(forbidden_nip_list)
-    if mask.any():
-        print("[WARN] PLIK ZAWIERA ZAKAZANYCH KONTRAHENTÓW:")
-        print(df.loc[mask,["Kontrahent"]])
-    if maska_nip.any():
-        print("[WARN] PLIK ZAWIERA NIPY ZAKAZANYCH KONTRAHENTÓW:")
-        print(df.loc[maska_nip, ["NIP"]])
-
-    # --- walidacja (loguj, nie wycinaj) ---
-    df, error_log = validate_df(
-        df,
-        date_col="Data wystawienia",
-        netto_col="Netto",
-        vat_col="VAT",
-        brutto_col="Brutto",
-        tol=0.01,
-        on_error="keep",
-    )
     #export_error_log(error_log, os.path.join(OUTPUT_DIR, f"errors_{ts}.csv"))
 
-    # --- ujemne kwoty do raportu i outputu ---
-    mask_negative = (df["Netto"] <= 0) | (df["VAT"] <= 0) | (df["Brutto"] <= 0)
-    if mask_negative.any():
-        print(f"[WARN] Pomijam {int(mask_negative.sum())} wierszy z ujemnymi kwotami (zapisano raport).")
-        df.loc[mask_negative].to_csv(os.path.join(OUTPUT_DIR, f"ujemne_{ts}.csv"), index=False, encoding="utf-8-sig")
-    df = df.loc[~mask_negative].copy()
-    if df.empty:
-        with open(output_path, "w", encoding=OUTPUT_ENCODING) as f:
-            f.write("")
-        print("[INFO] Po filtracji brak poprawnych wierszy.")
-        return
-    try:
-        raporty = export_grouped_excels(
-            df=df,
-            out_dir="raporty_faktur_xlsx",
-            nazwa_spolki=company.upper()
-        )
-        print("[XLSX] Raporty zapisane:", len(raporty))
-    except Exception as e:
-        print(f"[XLSX] Błąd generowania raportów: {e}")
-
-    raport_excell_dir = "raporty_faktur_xlsx"
-
-    logging.info(f"[EXPORT] Zapisano raport z fakturami kontrahentów do folderu %s",raport_excell_dir)
-
-    df["__vat_gr"] = df["VAT"].apply(money_to_grosze)
-    df["__netto_gr"] = df["Netto"].apply(money_to_grosze)
-    df["__brutto_gr"] = df["Brutto"].apply(money_to_grosze)
-
-    df["__data_str"] = df["Data wystawienia"].apply(serializacja_dat)  # YYYYMMDD
-    df["__nip_clean"] = df["NIP"].astype(str).str.replace(r"\D", "", regex=True)
-    df["__nip_two"] = df["NIP"]
-    df["__doc_no_norm"] = df["Numer dokumentu"].map(_norm_doc_no)
+    logging.info(f"[EXPORT] Zapisano raport z fakturami kontrahentów do folderu %s","raporty_faktur_xlsx")
 
     #  pobierz z bazy faktury już opłacone ( po nipie i nr_faktury)
     paid_keys = get_paid_invoice_keys()  # set[(nip_clean, numer_faktury_norm)]
 
-    # oznaczanie już opłaconych wierszy
-    def _is_paid(row) -> bool:
-        nip = row["__nip_clean"]
-        if len(nip) != 10 or not nip.isdigit():
-            return False  # bez NIP-a nie jesteśmy w stanie sprawdzić -> traktujemy jako nowe
-        key = (nip, row["__doc_no_norm"])
-        return key in paid_keys
-
     mask_paid = df.apply(_is_paid, axis=1)
-    num_paid = int(mask_paid.sum())
 
-    if num_paid:
-        skipped_path = os.path.join(
-            OUTPUT_DIR,
-            f"pominiete_oplacone_{key}_{ts}.csv"
-        )
-        df.loc[mask_paid, ["Numer dokumentu", "NIP", "Kontrahent", "Brutto"]].to_csv(
-            skipped_path,
-            index=False,
-            encoding="utf-8-sig"
-        )
-        print(f"[DB] Pominięto {num_paid} wierszy – faktury już opłacone (log: {skipped_path})")
+    save_skipped_paid_invoices(
+        df,
+        mask_paid,
+        company_key=key,
+        ts=ts,
+    )
 
-    # 3) wyrzucenie opłaconych faktury z dalszego przetwarzania
+    # usuń opłacone faktury z dataframea
     df = df.loc[~mask_paid].copy()
+
+    df_day,agg = aggregate_invoices(df)
 
     if df.empty:
         print("[ELIXIR] Wszystkie faktury z pliku są już opłacone – nie generuję plików ELIXIR.")
         return
 
-    # klucz grupowania: NIP(10) albo fallback NAME::
-    df["__grp_key"] = df.apply(
-        lambda r: r["__nip_clean"] if len(r["__nip_clean"]) == 10 else f"NAME::{r['Kontrahent']}",
-        axis=1
-    )
-
-    # --- agregacja: kontrahent/dzień (data wpływu) ---
-    df_day = df.loc[df["__data_str"].notna()].copy()
-    agg = (
-        df_day.groupby(["__grp_key", "__data_str"], as_index=False)
-        .agg(
-            nip_clean   =("__nip_clean", "first"),
-            kontrahent  =("Kontrahent", "first"),
-            first_doc   =("Numer dokumentu", "first"),
-            suma_brutto =("Brutto", "sum"),
-            suma_vat    =("VAT", "sum"),
-            suma_netto  =("Netto", "sum"),
-            cnt_docs    =("Numer dokumentu", "nunique"),
-            cnt_rows    =("Brutto", "size"),
-        )
-    )
-
-    # kwoty w groszach po sumowaniu w PLN
-    agg["suma_brutto_gr"] = agg["suma_brutto"].apply(money_to_grosze)
-    agg["suma_vat_gr"]    = agg["suma_vat"].apply(money_to_grosze)
-    agg["suma_netto_gr"]  = agg["suma_netto"].apply(money_to_grosze)
-
-    # daty do pliku bankowego
-    def _safe_ddmmyy(s: str) -> str:
-        return datetime.strptime(s, "%Y%m%d").strftime("%d%m%y")
-    agg["data_platnosci"]     = agg["__data_str"].apply(lambda s: _safe_add30(s, s))  # +30 dni
-    agg["data_wplywu_ddmmyy"] = agg["__data_str"].apply(_safe_ddmmyy)
-
-    # twardy check kolumn
-    required = {"__data_str", "data_platnosci", "data_wplywu_ddmmyy",
-                "suma_brutto_gr", "suma_vat_gr", "suma_netto_gr"}
-    missing = required - set(agg.columns)
-    if missing:
-        raise RuntimeError(f"Brakuje kolumn w 'agg': {missing}")
 
     json_path = save_grouped_json(df, agg, key, base_dir="json")
     print(f"[JSON] Zapisano plik: {json_path}")
 
     if merged_csv:
-        # Bezpieczna serializacja "Data wpływu" -> YYYYMMDD
-        def _safe_yyyymmdd(val):
-            try:
-                return serializacja_dat(val)
-            except Exception:
-                return None
-
         df_rep = df.copy()
         # Data wpływu jako string YYYYMMDD do grupowania
         df_rep["__wplyw_str"] = df_rep["Data wystawienia"].map(_safe_yyyymmdd)
@@ -1658,8 +1806,6 @@ def przetworz_plik_xlsx(
     lines_by_day: dict[str, list[str]] = defaultdict(list)
     adres_cache: dict[str, str] = {}
 
-    from selenium.common.exceptions import WebDriverException  # na wszelki wypadek
-
     try:
         with RegonScraper(CHROMEDRIVER_PATH, headless=headless) as scraper:
             for _, row in agg.iterrows():
@@ -1696,8 +1842,6 @@ def przetworz_plik_xlsx(
                     f"/INV/FV{data_wplywu_ddmmyy}|"
                     f"/IDP/{informacja}"
                 )
-
-                # szczegoly_wrapped = wrap_szczegoly(szczegoly)
 
                 line = build_payment_record(
                     data_platnosci=row["data_platnosci"],  # już policzone w agg (D+30)
@@ -1774,9 +1918,6 @@ def przetworz_plik_xlsx(
     base_dir = os.path.join("pliki_przelewow", key, f"przelewy_{key}_{today_str}")
     os.makedirs(base_dir, exist_ok=True)
 
-    def _ddmmyy(s: str) -> str:
-        return datetime.strptime(s, "%Y%m%d").strftime("%d%m%y")
-
     total_saved = 0
     for day_key, day_lines in sorted(lines_by_day.items()):
         data_wystawienia    = day_key
@@ -1798,13 +1939,11 @@ def przetworz_plik_xlsx(
         print(f"[ELIXIR] Zapisano {len(day_lines)} rekordów dla dnia {day_key} → {out_day_path} (encoding={OUTPUT_ENCODING})")
         total_saved += len(day_lines)
 
-    print(f"[ELIXIR] Łącznie zapisanych rekordów (wszystkie dni): {total_saved}")
-
     # zapis faktur do bazy danych
     if getattr(args, "save_db", False):
         try:
             logging.info("[DB] Rozpoczynam zapis faktur do bazy...")
-            # tu zapisujemy dokładnie te faktury, które poszły do ELIXIR-a
+            # zapis faktur do bazy które mają zostać opłacone
             zapisz_faktury_do_bazy(df_day, company.upper())
         except Exception as e:
             logging.error("[DB] Błąd zapisu faktur do bazy: %s", e)
@@ -1841,6 +1980,5 @@ if __name__ == "__main__":
         duplicates_action=args.dup,
         headless=args.headless,
         merged_csv=args.merged_csv,
-        per_group_dir=args.per_group_dir,
         save_db = args.save_db
     )

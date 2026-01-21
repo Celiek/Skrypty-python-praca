@@ -1,19 +1,28 @@
-import os
-import logging
-import re
 import json
+import logging
+import os
+import re
+from datetime import datetime
+from datetime import timedelta, date
 from pathlib import Path
 from typing import Dict
-from tqdm import tqdm
 
 import requests
-from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
-from utils import _safe_name
-from filelock import FileLock
-
-
 from dotenv import load_dotenv
+from filelock import FileLock
+from tqdm import tqdm
+
+from utils import _safe_name
+
+from db_ops import (
+    get_addresses_from_db,
+    get_invoice_details,
+    reserve_commission_invoice,
+    finalize_commission_invoice,
+)
+from utils import clean_nip
+
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
@@ -22,13 +31,13 @@ BASE_DIR = Path(__file__).resolve().parent
 COUNTER_FILE = BASE_DIR / "utils" / "licznik_faktur.json"
 LOCK_FILE = COUNTER_FILE.with_suffix(".lock")
 
-# PRefixy spółek
+# Prefixy spółek
 COMPANY_PREFIX = {
     "SHUMEE": "SM",
     "GREATSTORE": "GS",
     "EXTRASTORE": "EX",
-    # jeśli pojawi się 4. spółka:
-    # "TSM3": "TSM3"
+    # spółka testowa:
+    "TSM3": "TSM3"
 }
 
 FAKTUROWNIA_URL = os.getenv("FAKTUROWNIA_URL", "https://shumee.fakturownia.pl")
@@ -52,7 +61,7 @@ MIESIACE_PL = {
 
 
 def parse_address(addr: str):
-    """Rozdziela adres z bazy (np. 'ul. Warszawska 12 | 00-123 Warszawa') na street, post_code, city."""
+    """Rozdziela adres z bazy (np. 'ul. Warszawska 12 | 00-123 Warszawa') na ulica,nr , miasto."""
     if not addr:
         return "", "", ""
     addr = str(addr).replace("|", ",").replace("–", "-")
@@ -62,7 +71,7 @@ def parse_address(addr: str):
     post_code = ""
     city = ""
 
-    # szukamy kodu pocztowego (np. 00-123)
+    # wysukiwanie kodu pocztowego (np. XX-YYY)
     for p in parts:
         if re.match(r"\d{2}-\d{3}", p):
             post_code = re.search(r"\d{2}-\d{3}", p).group()
@@ -79,7 +88,7 @@ def parse_address(addr: str):
 def _load_counter() -> Dict[str, int]:
     if COUNTER_FILE.exists():
         try:
-            # poprawka: json.load() → json.loads(COUNTER_FILE.read_text())
+            # poprawka: json.load() na  json.loads(COUNTER_FILE.read_text())
             return json.loads(COUNTER_FILE.read_text())
         except json.JSONDecodeError:
             logging.error("⚠️ licznik_faktur.json uszkodzony — start od zera")
@@ -106,8 +115,9 @@ def get_invoice_number(company: str, previous_month: date) -> str:
         counter[key] = current_no
         _save_counter(counter)
         issue_date = datetime.now().date()
-        year_yy = str(previous_month.year)[-2:]
-
+        # na czas 1 stycznia 2025
+        #year_yy = str(previous_month.year)[-2:]
+        year_yy = str(issue_date.year)[-2:]
         return f"{current_no}/{issue_date.month}/{year_yy}/{prefix}"
 
 def get_invoice_public_url(invoice_id: int) -> str | None:
@@ -135,14 +145,24 @@ def get_invoice_number_from_api(invoice_id: int) -> str:
         logging.warning(f"[FAKTUROWNIA] Nie udało się pobrać numeru faktury {invoice_id}: {e}")
         return f"FAKTURA-{invoice_id}"
 
-from tqdm import tqdm
 
-def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
+def get_faktur(
+    date_from: str,
+    date_to: str,
+    company_suffix: tuple[str, ...],
+    out_root="faktury",
+    out_ready_root="raporty_gotowe",
+):
+
     base_url = f"{FAKTUROWNIA_URL}/invoices.json"
     api_token = API_KEY
 
     all_invoices = []
     page = 1
+
+    # ===============================
+    # POBIERANIE LISTY FAKTUR
+    # ===============================
 
     with tqdm(desc="📡 Pobieranie listy faktur", unit="strona") as pbar:
         while True:
@@ -166,6 +186,9 @@ def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
             page += 1
             pbar.update(1)
 
+    # ==================================================
+    # FILTR PO SUFFIXIE SPÓŁKI ( konćówce nazyw faktury)
+    # ==================================================
     filtered = [
         inv for inv in all_invoices
         if str(inv.get("number", ""))
@@ -179,14 +202,22 @@ def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
         f"({company_suffix}) między {date_from}–{date_to}"
     )
 
-    out_dir = os.path.join("faktury", datetime.today().strftime("%Y-%m-%d"))
+    today_dir = datetime.today().strftime("%Y-%m-%d")
+
+    out_dir = os.path.join(out_root, today_dir)
+    ready_dir = os.path.join(out_ready_root, today_dir)
+
     os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(ready_dir, exist_ok=True)
 
     pobrane = []
 
+    # ==================================
+    # POBIERANIE faktur w formacie PDF
+    # ==================================
     for inv in tqdm(
         filtered,
-        desc=" Pobieranie faktur kontrahentów: ",
+        desc="Pobieranie faktur kontrahentów",
         unit="fv",
         ncols=100,
     ):
@@ -197,10 +228,15 @@ def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
         name = inv.get("buyer_name", "brak_nazwy")
         num = inv.get("number", "brak_numeru")
 
-        out_path = os.path.join(
-            out_dir,
-            f"{_safe_name(f'{name}_{nip}_{num}')}.pdf"
-        )
+        # standardyzcja nazwy pliku pdf dla nas
+        # nazwa kontrahenta + nip + numer faktury
+        std_name = _safe_name(f"{name}_{nip}_{num}.pdf")
+        std_path = os.path.join(out_dir, std_name)
+
+        # standaryzacja nazwy pliku pdf dla kontrahenta
+        # tylko nip.pdf
+        ready_name = f"{nip}.pdf"
+        ready_path = os.path.join(ready_dir, ready_name)
 
         try:
             with requests.get(
@@ -210,15 +246,23 @@ def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
                 timeout=60,
             ) as r:
                 r.raise_for_status()
-                with open(out_path, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
+
+                content = b"".join(r.iter_content(8192))
+
+                # zapis faktury dla nas do pliku
+                with open(std_path, "wb") as f:
+                    f.write(content)
+
+                # zapis faktury dla kontrahenta
+                with open(ready_path, "wb") as f:
+                    f.write(content)
 
             pobrane.append({
                 "id": inv_id,
                 "buyer_tax_no": nip,
                 "number": num,
-                "path": out_path,
+                "path": std_path,
+                "ready_path": ready_path,
                 "ok": True,
             })
 
@@ -228,87 +272,86 @@ def get_faktur(date_from: str, date_to: str, company_suffix: tuple[str, ...]):
                 "id": inv_id,
                 "buyer_tax_no": nip,
                 "number": num,
-                "path": out_path,
+                "path": std_path,
+                "ready_path": ready_path,
                 "ok": False,
                 "error": str(e),
             })
 
     return filtered, pobrane
 
-def parse_address(addr: str):
-    """Rozdziela adres z bazy (np. 'Pabianice|95-200|Pabianice|ul. Myśliwska 34A')
-    na street, post_code, city — kolejność dowolna.
+
+def dodaj_faktury(spolka: str, items: list[dict], department_id: int, issue_date: datetime.date) -> list[dict]:
     """
-    if not addr:
-        return "", "", ""
-
-    addr = str(addr).replace("–", "-").replace("|", ",")
-    parts = [a.strip() for a in addr.split(",") if a.strip()]
-
-    street, post_code, city = "", "", ""
-
-    for p in parts:
-        if re.match(r"^\d{2}-\d{3}$", p):
-            post_code = p
-        elif re.search(r"\d", p) or "ul" in p.lower():
-            street = p
-        else:
-            city = p
-
-    if not city and len(parts) >= 2:
-        city = parts[0]
-
-    return street, post_code, city
-
-def dodaj_faktury(spolka: str, items: list[dict], department_id: int,issue_date: datetime.date) -> list[dict]:
+    Wystawia faktury przez API Fakturowni i zwraca ich dane.
+    Zabezpieczenie anty-duplikat: blokada w DB (spółka+nip+okres).
     """
-    Wystawia faktury przez API Fakturowni i zwraca ich pełne dane
-    (z numerem faktury, kwotami i danymi kontrahenta).
-    """
-    from db_ops import get_addresses_from_db, get_invoice_details
+
     api_token = os.getenv("API_KEY")
     base_url = os.getenv("FAKTUROWNIA_URL", "https://shumee.fakturownia.pl")
 
-    adresy = get_addresses_from_db()  # {NIP: adres}
+    # {NIP: adres}
+    adresy = get_addresses_from_db()
 
     today = datetime.today()
-    poprzedni = today - relativedelta(months=1)
+    poprzedni = today - relativedelta(months=1)   # “okres prowizji” = poprzedni miesiąc
+    okres = f"{poprzedni.year}-{poprzedni.month:02d}"
     payment_to = today + timedelta(days=14)
 
     url = f"{base_url}/invoices.json"
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
+    # --- deduplikacja items po NIP (żeby jeden NIP nie poszedł dwa razy do fakturowni) ---
+    dedup = {}
+    for it in items:
+        nip_key = clean_nip(it.get("buyer_tax_no"))
+        if not nip_key:
+            continue
+        dedup[nip_key] = it  # ostatni wygrywa
+    items_unique = list(dedup.values())
+
     results = []
-    pominięci = 0
+    pominieci = 0
 
     with requests.Session() as s:
         s.headers.update(headers)
-        for it in items:
-            nip_clean = str(it["buyer_tax_no"]).replace("PL", "").strip()
 
+        for it in items_unique:
+            nip_clean = clean_nip(it.get("buyer_tax_no"))
+            if not nip_clean:
+                results.append({"nip": it.get("buyer_tax_no"), "ok": False, "error": "Brak/nieprawidłowy NIP"})
+                continue
+
+            # 1) DB LOCK / niezmienna
+            # jeśli już było wystawione (lub inny proces zarezerwował) -> SKIP
+            if not reserve_commission_invoice(spolka, nip_clean, okres):
+                results.append({"nip": nip_clean, "ok": False, "skipped": True, "reason": "already_issued_or_reserved"})
+                continue
+
+            # 2) adres
             addr_raw = adresy.get(nip_clean)
             if not addr_raw:
                 logging.warning(f"[FAKTUROWNIA] ⚠️ Pominięto NIP {nip_clean} – brak adresu w bazie.")
-                pominięci += 1
+                pominieci += 1
+                results.append({"nip": nip_clean, "ok": False, "skipped": True, "reason": "no_address"})
                 continue
 
             street, post_code, city = parse_address(addr_raw)
 
+            # 3) numer FV
             nr_faktury = get_invoice_number(spolka, poprzedni)
 
-            # dodać zmianę numeru faktury
             payload = {
                 "api_token": api_token,
                 "invoice": {
                     "kind": "vat",
                     "number": nr_faktury,
-                    # "ignore_duplicate_number":1,
                     "issue_date": today.strftime("%Y-%m-%d"),
                     "sell_date": issue_date.strftime("%Y-%m-%d"),
                     "payment_to": payment_to.strftime("%Y-%m-%d"),
                     "department_id": department_id,
                     "buyer_name": it["buyer_name"],
-                    "buyer_tax_no": it["buyer_tax_no"],
+                    "buyer_tax_no": nip_clean,   # sformatowany nip
                     "buyer_email": it.get("buyer_email"),
                     "buyer_street": street,
                     "buyer_post_code": post_code,
@@ -325,15 +368,27 @@ def dodaj_faktury(spolka: str, items: list[dict], department_id: int,issue_date:
 
             try:
                 r = s.post(url, json=payload, timeout=30)
+
+                # sprawdzanie odpowiedzi serwera na dane
+                # przesłane od klienta
+                # 200 Jest okej
+                # 300 jest błąd
                 if 200 <= r.status_code < 300:
                     data = r.json()
                     faktura_id = data.get("id")
                     details = get_invoice_details(faktura_id)
+                    nr = details.get("number") or details.get("full_number")
+
+                    # 4) FINALIZE w DB
+                    try:
+                        finalize_commission_invoice(spolka, nip_clean, okres, int(faktura_id), nr)
+                    except Exception as e:
+                        logging.exception(f"[IDEMPOTENCY] Nie udało się zapisać finalize do DB: {e}")
 
                     results.append({
                         "ok": True,
                         "id": faktura_id,
-                        "number": details.get("number"),
+                        "number": nr,
                         "issue_date": details.get("issue_date"),
                         "netto": details.get("price_net"),
                         "vat": details.get("price_tax"),
@@ -345,16 +400,18 @@ def dodaj_faktury(spolka: str, items: list[dict], department_id: int,issue_date:
                         "buyer_city": details.get("buyer_city"),
                     })
 
-                    logging.info(f"[FAKTUROWNIA] ✅ Faktura dla {it['buyer_name']} ({nip_clean}) "
-                                 f"→ {street}, {post_code} {city} (nr: {details.get('number')})")
+                    logging.info(
+                        f"[FAKTUROWNIA] ✅ Faktura dla {it['buyer_name']} ({nip_clean}) "
+                        f"→ {street}, {post_code} {city} (nr: {nr})"
+                    )
 
                 else:
                     logging.error(f"[FAKTUROWNIA] ❌ Błąd {r.status_code}: {r.text[:200]}")
-                    results.append({"nip": it["buyer_tax_no"], "ok": False, "error": r.text})
+                    results.append({"nip": nip_clean, "ok": False, "error": r.text})
 
             except Exception as e:
-                logging.error(f"[FAKTUROWNIA] Błąd wysyłki dla {it['buyer_tax_no']}: {e}")
-                results.append({"nip": it["buyer_tax_no"], "ok": False, "error": str(e)})
+                logging.error(f"[FAKTUROWNIA] Błąd wysyłki dla {nip_clean}: {e}")
+                results.append({"nip": nip_clean, "ok": False, "error": str(e)})
 
-    logging.info(f"[FAKTUROWNIA] Pominięto {pominięci} kontrahentów bez adresu w bazie.")
+    logging.info(f"[FAKTUROWNIA] Pominięto {pominieci} kontrahentów bez adresu w bazie.")
     return results

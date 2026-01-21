@@ -163,8 +163,7 @@ def clean_df(df : pd.DataFrame) -> pd.DataFrame:
         )
 
         logging.info(
-            f"[FILTER] Usunięto {removed_count} wierszy z płatnikiem ALLEGRO."
-        )
+            f"[FILTER] Usunięto {removed_count} wierszy z płatnikiem ALLEGRO."        )
         logging.debug(
             f"[FILTER] Szczegóły usuniętych płatników: {removed_values}"
         )
